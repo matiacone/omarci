@@ -1,0 +1,473 @@
+#!/usr/bin/env bash
+# Local CI job bus. Scripts start/finish jobs; the Omarci bar plugin displays them.
+set -euo pipefail
+
+SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
+STATE_HOME=${XDG_STATE_HOME:-"$HOME/.local/state"}
+OMARCI_DIR=${OMARCI_DIR:-"$STATE_HOME/omarci"}
+INDEX=$OMARCI_DIR/index.json
+LOCK=$OMARCI_DIR/index.lock
+LOGS=$OMARCI_DIR/logs
+MAX_JOBS=${OMARCI_MAX_JOBS:-50}
+
+die() { printf 'omarci: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage:
+  omarci start [--name NAME] [--cwd DIR] [--pid PID]
+  omarci pass <id> [-m MESSAGE] [--no-notify]
+  omarci fail <id> [-m MESSAGE] [--no-notify]
+  omarci run [--name NAME] [--cwd DIR] [--bg] [--no-notify] [--] CMD...
+  omarci list [--json]
+  omarci show <id>
+  omarci logs <id> [--tail N]
+  omarci dismiss <id>
+  omarci clear [--prune]
+
+Jobs are stored in $XDG_STATE_HOME/omarci (override with OMARCI_DIR).
+`run` waits for CMD and exits with its status. `--bg` returns the job id
+immediately. Pass and fail notify via notify-send unless --no-notify,
+OMARCI_NOTIFY=0, or notifications are disabled in the widget settings.
+EOF
+}
+
+ensure_dirs() {
+  mkdir -p -- "$OMARCI_DIR" "$LOGS"
+}
+
+acquire() {
+  ensure_dirs
+  exec 9>"$LOCK"
+  flock 9
+}
+
+release() {
+  flock -u 9 2>/dev/null || true
+}
+
+read_index() {
+  if [[ -f $INDEX ]]; then
+    cat "$INDEX"
+  else
+    printf '%s\n' '{"version":1,"jobs":[]}'
+  fi
+}
+
+write_index() {
+  local tmp
+  tmp=$(mktemp "$OMARCI_DIR/index.XXXXXX")
+  cat >"$tmp"
+  mv "$tmp" "$INDEX"
+}
+
+new_id() {
+  printf '%s-%04x' "$(date +%Y%m%dT%H%M%S)" "$RANDOM"
+}
+
+now_sec() { date +%s; }
+
+notify_enabled() {
+  [[ ${OMARCI_NOTIFY:-1} != 0 && ${NOTIFY:-1} == 1 ]] || return 1
+  local settings=$OMARCI_DIR/settings.json on
+  [[ -f $settings ]] || return 0
+  on=$(jq -r '.notify // true' "$settings" 2>/dev/null || printf 'true')
+  [[ $on == true || $on == 1 ]]
+}
+
+notify() {
+  local urgency=$1 title=$2 body=$3
+  notify_enabled || return 0
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send --app-name=omarci --urgency="$urgency" "$title" "$body" || true
+}
+
+valid_id() {
+  [[ ${1:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $1 != *..* ]]
+}
+
+job_log_path() {
+  printf '%s/%s.log' "$LOGS" "$1"
+}
+
+truncate_msg() {
+  local s=$1
+  if (( ${#s} > 500 )); then printf '%s…' "${s:0:499}"; else printf '%s' "$s"; fi
+}
+
+truncate_name() {
+  local s=$1
+  if (( ${#s} > 80 )); then printf '%s…' "${s:0:79}"; else printf '%s' "$s"; fi
+}
+
+fmt_secs() {
+  local s=$1
+  if (( s < 0 )); then s=0; fi
+  if (( s >= 3600 )); then printf '%dh%02dm' $((s / 3600)) $(((s % 3600) / 60))
+  elif (( s >= 60 )); then printf '%dm%02ds' $((s / 60)) $((s % 60))
+  else printf '%ds' "$s"
+  fi
+}
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || die "jq is required"
+}
+
+cmd_start() {
+  require_jq
+  local name="" cwd=$PWD pid=""
+  while (( $# )); do
+    case $1 in
+      --name) name=${2:-}; [[ -n $name ]] || die "--name needs a value"; shift 2 ;;
+      --cwd) cwd=${2:-}; [[ -n $cwd ]] || die "--cwd needs a value"; shift 2 ;;
+      --pid) pid=${2:-}; [[ -n $pid ]] || die "--pid needs a value"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown start option: $1" ;;
+    esac
+  done
+  [[ -n $name ]] || name=job
+  name=$(truncate_name "$name")
+  [[ $cwd == /* ]] || cwd=$(cd -- "$cwd" && pwd)
+  local id log started
+  id=$(new_id)
+  log=$(job_log_path "$id")
+  started=$(now_sec)
+  ensure_dirs
+  : >"$log"
+
+  acquire
+  read_index | jq \
+    --arg id "$id" \
+    --arg name "$name" \
+    --arg cwd "$cwd" \
+    --arg log "$log" \
+    --arg pid "$pid" \
+    --argjson started "$started" \
+    --argjson max "$MAX_JOBS" \
+    '
+      .version = 1
+      | .jobs = [{
+          id: $id,
+          name: $name,
+          cwd: $cwd,
+          status: "running",
+          message: "",
+          startedAt: $started,
+          finishedAt: null,
+          pid: (if $pid == "" then null else ($pid | tonumber? // $pid) end),
+          log: $log,
+          dismissed: false,
+          command: ""
+        }] + (.jobs // [])
+      | .jobs = .jobs[:$max]
+    ' | write_index
+  release
+  printf '%s\n' "$id"
+}
+
+set_command() {
+  local id=$1 cmd=$2
+  acquire
+  read_index | jq \
+    --arg id "$id" \
+    --arg cmd "$cmd" \
+    '(.jobs[] | select(.id == $id) | .command) = $cmd' | write_index
+  release
+}
+
+set_pid() {
+  local id=$1 pid=$2
+  acquire
+  read_index | jq \
+    --arg id "$id" \
+    --argjson pid "$pid" \
+    '(.jobs[] | select(.id == $id) | .pid) = $pid' | write_index
+  release
+}
+
+finish_job() {
+  local status=$1 id=$2 message=$3
+  valid_id "$id" || die "invalid job id"
+  require_jq
+  message=$(truncate_msg "$message")
+  local finished
+  finished=$(now_sec)
+
+  acquire
+  local current found
+  current=$(read_index)
+  found=$(jq -r --arg id "$id" '[.jobs[] | select(.id == $id)] | length' <<<"$current")
+  if [[ $found != 1 ]]; then
+    release
+    die "no such job: $id"
+  fi
+  local already
+  already=$(jq -r --arg id "$id" '.jobs[] | select(.id == $id) | .status' <<<"$current")
+  if [[ $already != running ]]; then
+    release
+    die "job $id is already $already"
+  fi
+  printf '%s\n' "$current" | jq \
+    --arg id "$id" \
+    --arg status "$status" \
+    --arg message "$message" \
+    --argjson finished "$finished" \
+    '
+      (.jobs[] | select(.id == $id)) |= (
+        .status = $status
+        | .message = $message
+        | .finishedAt = $finished
+      )
+    ' | write_index
+  local name took started
+  name=$(jq -r --arg id "$id" '.jobs[] | select(.id == $id) | .name' <<<"$current")
+  started=$(jq -r --arg id "$id" '.jobs[] | select(.id == $id) | .startedAt' <<<"$current")
+  release
+
+  took=$(fmt_secs $((finished - started)))
+  if [[ $status == pass ]]; then
+    notify low "omarci passed" "$name · $took${message:+ · $message}"
+  else
+    notify critical "omarci failed" "$name · $took${message:+ · $message}"
+  fi
+}
+
+cmd_pass() { parse_finish pass "$@"; }
+cmd_fail() { parse_finish fail "$@"; }
+
+parse_finish() {
+  local status=$1; shift
+  local id="" message=""
+  NOTIFY=1
+  while (( $# )); do
+    case $1 in
+      -m|--message) message=${2:-}; shift 2 ;;
+      --no-notify) NOTIFY=0; shift ;;
+      -h|--help) usage; return 0 ;;
+      --*) die "unknown option: $1" ;;
+      *)
+        if [[ -z $id ]]; then id=$1; shift
+        else die "unexpected argument: $1"
+        fi
+        ;;
+    esac
+  done
+  [[ -n $id ]] || die "$status needs a job id"
+  finish_job "$status" "$id" "$message"
+}
+
+cmd_run() {
+  require_jq
+  local name="" cwd=$PWD bg=0
+  NOTIFY=1
+  local -a cmd=()
+  while (( $# )); do
+    case $1 in
+      --name) name=${2:-}; [[ -n $name ]] || die "--name needs a value"; shift 2 ;;
+      --cwd) cwd=${2:-}; [[ -n $cwd ]] || die "--cwd needs a value"; shift 2 ;;
+      --bg) bg=1; shift ;;
+      --no-notify) NOTIFY=0; shift ;;
+      -h|--help) usage; return 0 ;;
+      --) shift; cmd=("$@"); break ;;
+      --*) die "unknown run option: $1" ;;
+      *) cmd=("$@"); break ;;
+    esac
+  done
+  (( ${#cmd[@]} > 0 )) || die "run needs a command"
+  [[ -n $name ]] || name=${cmd[0]##*/}
+  [[ $cwd == /* ]] || cwd=$(cd -- "$cwd" && pwd)
+
+  local display=""
+  local part
+  for part in "${cmd[@]}"; do
+    display+="${display:+ }$(printf '%q' "$part")"
+  done
+
+  local notify_flag=()
+  if [[ $NOTIFY == 0 ]]; then notify_flag=(--no-notify); fi
+
+  local id
+  id=$(cmd_start --name "$name" --cwd "$cwd")
+  set_command "$id" "$display"
+  local log
+  log=$(job_log_path "$id")
+
+  if (( bg )); then
+    (
+      trap '' HUP
+      cd -- "$cwd"
+      set +e
+      "${cmd[@]}" >"$log" 2>&1
+      local rc=$?
+      if (( rc == 0 )); then
+        "$SELF" pass "$id" -m "exit 0" "${notify_flag[@]}"
+      else
+        "$SELF" fail "$id" -m "exit $rc" "${notify_flag[@]}"
+      fi
+    ) </dev/null >/dev/null 2>&1 &
+    set_pid "$id" $!
+    printf '%s\n' "$id"
+    return 0
+  fi
+
+  cd -- "$cwd"
+  local rc=0
+  set +e
+  "${cmd[@]}" 2>&1 | tee -a "$log"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if (( rc == 0 )); then
+    cmd_pass "$id" -m "exit 0" "${notify_flag[@]}"
+  else
+    cmd_fail "$id" -m "exit $rc" "${notify_flag[@]}"
+  fi
+  return "$rc"
+}
+
+cmd_list() {
+  require_jq
+  local json=0
+  while (( $# )); do
+    case $1 in
+      --json) json=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown list option: $1" ;;
+    esac
+  done
+  local data
+  data=$(read_index)
+  if (( json )); then
+    jq '.jobs' <<<"$data"
+    return
+  fi
+  local now
+  now=$(now_sec)
+  jq -r --argjson now "$now" '
+    def dur(s):
+      if s < 60 then (s|tostring) + "s"
+      elif s < 3600 then ((s/60|floor)|tostring) + "m" + ((s%60)|tostring) + "s"
+      else ((s/3600|floor)|tostring) + "h" + (((s%3600)/60|floor)|tostring) + "m"
+      end;
+    .jobs[]
+    | . as $j
+    | ($j.finishedAt // $now) as $end
+    | [
+        $j.id,
+        $j.status,
+        $j.name,
+        dur(($end - $j.startedAt) | floor),
+        ($j.message // "")
+      ] | @tsv
+  ' <<<"$data" | awk -F'\t' 'BEGIN {
+      printf "%-22s %-8s %-24s %-8s %s\n", "ID", "STATUS", "NAME", "TIME", "MESSAGE"
+    }
+    { printf "%-22s %-8s %-24s %-8s %s\n", $1, $2, substr($3,1,24), $4, $5 }'
+}
+
+cmd_show() {
+  require_jq
+  local id=${1:-}
+  [[ -n $id ]] || die "show needs a job id"
+  valid_id "$id" || die "invalid job id"
+  local job
+  job=$(read_index | jq --arg id "$id" '.jobs[] | select(.id == $id)')
+  [[ -n $job ]] || die "no such job: $id"
+  jq . <<<"$job"
+}
+
+cmd_logs() {
+  require_jq
+  local id="" tail_n=""
+  while (( $# )); do
+    case $1 in
+      --tail) tail_n=${2:-}; [[ $tail_n =~ ^[0-9]+$ ]] || die "--tail needs a count"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      --*) die "unknown logs option: $1" ;;
+      *)
+        if [[ -z $id ]]; then id=$1; shift
+        else die "unexpected argument: $1"
+        fi
+        ;;
+    esac
+  done
+  [[ -n $id ]] || die "logs needs a job id"
+  valid_id "$id" || die "invalid job id"
+  local log expected
+  log=$(read_index | jq -r --arg id "$id" '.jobs[] | select(.id == $id) | .log // empty')
+  [[ -n $log ]] || die "no such job: $id"
+  expected=$(job_log_path "$id")
+  [[ $log == "$expected" ]] || die "job log path is not under $LOGS"
+  [[ -f $log ]] || die "log file missing: $log"
+  if [[ -n $tail_n ]]; then
+    tail -n "$tail_n" "$log"
+  else
+    cat "$log"
+  fi
+}
+
+cmd_dismiss() {
+  require_jq
+  local id=${1:-}
+  [[ -n $id ]] || die "dismiss needs a job id"
+  valid_id "$id" || die "invalid job id"
+  acquire
+  local current found
+  current=$(read_index)
+  found=$(jq -r --arg id "$id" '[.jobs[] | select(.id == $id)] | length' <<<"$current")
+  if [[ $found != 1 ]]; then
+    release
+    die "no such job: $id"
+  fi
+  printf '%s\n' "$current" | jq --arg id "$id" \
+    '(.jobs[] | select(.id == $id) | .dismissed) = true' | write_index
+  release
+}
+
+cmd_clear() {
+  require_jq
+  local prune=0
+  while (( $# )); do
+    case $1 in
+      --prune) prune=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown clear option: $1" ;;
+    esac
+  done
+  acquire
+  local current
+  current=$(read_index)
+  if (( prune )); then
+    local ids
+    ids=$(jq -r '.jobs[] | select(.dismissed == true) | .id' <<<"$current")
+    printf '%s\n' "$current" | jq '.jobs |= map(select(.dismissed != true))' | write_index
+    release
+    local id
+    while IFS= read -r id; do
+      [[ -n $id ]] || continue
+      rm -f "$(job_log_path "$id")"
+    done <<<"$ids"
+  else
+    printf '%s\n' "$current" | jq \
+      '.jobs |= map(if .status != "running" then .dismissed = true else . end)' | write_index
+    release
+  fi
+}
+
+main() {
+  local cmd=${1:-}
+  case $cmd in
+    ""|-h|--help|help) usage ;;
+    start) shift; cmd_start "$@" ;;
+    pass) shift; cmd_pass "$@" ;;
+    fail) shift; cmd_fail "$@" ;;
+    run) shift; cmd_run "$@" ;;
+    list) shift; cmd_list "$@" ;;
+    show) shift; cmd_show "$@" ;;
+    logs) shift; cmd_logs "$@" ;;
+    dismiss) shift; cmd_dismiss "$@" ;;
+    clear) shift; cmd_clear "$@" ;;
+    *) die "unknown command: $cmd (see omarci --help)" ;;
+  esac
+}
+
+main "$@"
