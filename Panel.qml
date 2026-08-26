@@ -120,8 +120,11 @@ Panel {
     var raw = stripAnsi(text).replace(/\r/g, "").split("\n")
     var lines = []
     var blanks = 0
-    for (var i = 0; i < raw.length; i++) {
+    var maxLines = 200
+    var maxLine = 2048
+    for (var i = 0; i < raw.length && lines.length < maxLines; i++) {
       var line = tidyLogLine(String(raw[i]).replace(/[ \t]+$/g, ""))
+      if (line.length > maxLine) line = line.substring(0, maxLine)
       if (line === "") {
         blanks++
         if (blanks > 1) continue
@@ -130,8 +133,11 @@ Panel {
       }
       blanks = 0
       var parts = line.split("\n")
-      for (var p = 0; p < parts.length; p++)
-        lines.push({ text: parts[p], kind: lineKind(parts[p]) })
+      for (var p = 0; p < parts.length && lines.length < maxLines; p++) {
+        var part = parts[p]
+        if (part.length > maxLine) part = part.substring(0, maxLine)
+        lines.push({ text: part, kind: lineKind(part) })
+      }
     }
     logLines = lines
   }
@@ -140,12 +146,23 @@ Panel {
     var job = selectedJob
     var id = job ? String(job.id || "") : ""
     followId = id
-    if (!id || !ci) {
+    var path = ci ? ci.safeLogPath(job) : ""
+    if (!id || !ci || path === "") {
       logText = ""
       logLines = []
       return
     }
-    tailProc.command = [ci.cliPath, "logs", "--tail", "200", id]
+    // Byte cap is on the process: tail -n only picks the window, head -c
+    // stops stdout before StdioCollector can grow without bound.
+    if (tailProc.running) tailProc.running = false
+    tailProc.command = [
+      "bash", "-c",
+      "tail -n \"$1\" -- \"$3\" | head -c \"$2\"",
+      "omarci-log-tail",
+      "200",
+      String(ci.maxLogBytes),
+      path
+    ]
     tailProc.running = true
   }
 

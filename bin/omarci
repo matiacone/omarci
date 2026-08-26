@@ -9,6 +9,8 @@ INDEX=$OMARCI_DIR/index.json
 LOCK=$OMARCI_DIR/index.lock
 LOGS=$OMARCI_DIR/logs
 MAX_JOBS=${OMARCI_MAX_JOBS:-50}
+MAX_INDEX_BYTES=${OMARCI_MAX_INDEX_BYTES:-65536}
+MAX_LOG_BYTES=${OMARCI_MAX_LOG_BYTES:-65536}
 
 die() { printf 'omarci: %s\n' "$*" >&2; exit 1; }
 
@@ -21,7 +23,7 @@ Usage:
   omarci run [--name NAME] [--cwd DIR] [--bg] [--no-notify] [--] CMD...
   omarci list [--json]
   omarci show <id>
-  omarci logs <id> [--tail N]
+  omarci logs <id> [--tail N] [--bytes N]
   omarci dismiss <id>
   omarci clear [--prune]
 
@@ -48,7 +50,7 @@ release() {
 
 read_index() {
   if [[ -f $INDEX ]]; then
-    cat "$INDEX"
+    head -c "$MAX_INDEX_BYTES" -- "$INDEX"
   else
     printf '%s\n' '{"version":1,"jobs":[]}'
   fi
@@ -377,10 +379,11 @@ cmd_show() {
 
 cmd_logs() {
   require_jq
-  local id="" tail_n=""
+  local id="" tail_n="" bytes=$MAX_LOG_BYTES
   while (( $# )); do
     case $1 in
       --tail) tail_n=${2:-}; [[ $tail_n =~ ^[0-9]+$ ]] || die "--tail needs a count"; shift 2 ;;
+      --bytes) bytes=${2:-}; [[ $bytes =~ ^[0-9]+$ ]] || die "--bytes needs a count"; shift 2 ;;
       -h|--help) usage; return 0 ;;
       --*) die "unknown logs option: $1" ;;
       *)
@@ -398,10 +401,18 @@ cmd_logs() {
   expected=$(job_log_path "$id")
   [[ $log == "$expected" ]] || die "job log path is not under $LOGS"
   [[ -f $log ]] || die "log file missing: $log"
+  # Byte cap is the bound. --tail only chooses which end; a single huge line
+  # still cannot exceed --bytes (default MAX_LOG_BYTES). --bytes 0 is full file.
   if [[ -n $tail_n ]]; then
-    tail -n "$tail_n" "$log"
+    if (( bytes > 0 )); then
+      tail -n "$tail_n" -- "$log" | head -c "$bytes"
+    else
+      tail -n "$tail_n" -- "$log"
+    fi
+  elif (( bytes > 0 )); then
+    head -c "$bytes" -- "$log"
   else
-    cat "$log"
+    cat -- "$log"
   fi
 }
 

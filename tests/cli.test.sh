@@ -57,4 +57,14 @@ done
   "$CLI" show "$qid" | jq -e '.status == "pass"' >/dev/null
 )
 
+# A single huge line must not exceed the byte cap even with --tail.
+huge_id=$("$CLI" start --name huge)
+log=$("$CLI" show "$huge_id" | jq -r .log)
+python3 -c 'import sys; sys.stdout.write("H"*200000 + "\nTINY\n")' >"$log"
+"$CLI" pass "$huge_id" -m ok --no-notify
+n=$("$CLI" logs --tail 200 "$huge_id" | wc -c)
+(( n <= 65536 )) || fail "logs --tail leaked $n bytes (cap 65536)"
+"$CLI" logs --tail 200 --bytes 100 "$huge_id" | wc -c | awk '{exit !($1<=100)}' \
+  || fail "logs --bytes 100 did not cap"
+
 printf 'ok\n'

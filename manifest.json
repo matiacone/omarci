@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.matiacone.omarci",
   "name": "Omarci",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Mathew",
   "license": "MIT",
   "description": "Local CI jobs in the Omarchy bar: schedule from scripts, watch pass/fail with logs and notifications",

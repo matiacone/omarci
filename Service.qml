@@ -20,6 +20,13 @@ Item {
 
   property bool notify: true
 
+  // Bounded reads: FileView never maps these files. `head -c` is the cap
+  // before stdout reaches StdioCollector / JSON.parse.
+  readonly property int maxIndexBytes: 65536
+  readonly property int maxSettingsBytes: 4096
+  readonly property int maxLogBytes: 65536
+  readonly property string logsDir: stateHome + "/omarci/logs/"
+
   property var jobs: []
   property double nowSec: Date.now() / 1000
   property int spinnerFrame: 0
@@ -125,6 +132,13 @@ Item {
     return d.getDate() + " " + months[d.getMonth()] + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes())
   }
 
+  function boundedText(collector, exitCode, cap) {
+    if (exitCode !== 0) return ""
+    var text = collector.text
+    if (text.length >= cap) return ""
+    return text
+  }
+
   function parse(content) {
     try {
       var parsed = JSON.parse(String(content || ""))
@@ -136,7 +150,17 @@ Item {
   }
 
   function reload() {
-    indexFile.reload()
+    root.readIndexBounded()
+  }
+
+  function readIndexBounded() {
+    if (indexReader.running) indexReader.running = false
+    indexReader.running = true
+  }
+
+  function readSettingsBounded() {
+    if (settingsReader.running) settingsReader.running = false
+    settingsReader.running = true
   }
 
   function parseSettings(content) {
@@ -154,6 +178,17 @@ Item {
     settingsFile.setText(JSON.stringify({ notify: root.notify }, null, 2) + "\n")
   }
 
+  function safeLogPath(job) {
+    if (!job) return ""
+    var p = String(job.log || "")
+    var prefix = root.logsDir
+    if (p.indexOf(prefix) !== 0) return ""
+    var rest = p.substring(prefix.length)
+    if (rest.length === 0 || rest.indexOf("/") !== -1 || rest.indexOf("..") !== -1)
+      return ""
+    return p
+  }
+
   Process {
     id: seedDir
     command: [
@@ -164,8 +199,8 @@ Item {
     ]
     running: true
     onExited: {
-      indexFile.reload()
-      settingsFile.reload()
+      root.readIndexBounded()
+      root.readSettingsBounded()
     }
   }
 
@@ -201,26 +236,64 @@ Item {
     onTriggered: root.spinnerFrame = (root.spinnerFrame + 1) % root.spinnerGlyphs.length
   }
 
+  // Watch only. preload off and text() is never called, so a huge or
+  // symlinked index cannot be mapped into the shell.
   FileView {
-    id: indexFile
+    id: indexWatch
     path: root.indexPath
+    preload: false
     watchChanges: true
-    atomicWrites: true
     printErrors: false
-    onLoaded: root.parse(text())
-    onLoadFailed: root.jobs = []
-    onFileChanged: reload()
+    onFileChanged: root.readIndexBounded()
   }
 
   FileView {
     id: settingsFile
     path: root.settingsPath
+    preload: false
     watchChanges: true
     atomicWrites: true
     printErrors: false
-    onLoaded: root.parseSettings(text())
-    onLoadFailed: root.notify = true
-    onFileChanged: settingsFile.reload()
+    onFileChanged: root.readSettingsBounded()
+  }
+
+  Process {
+    id: indexReader
+    command: ["head", "-c", String(root.maxIndexBytes), root.indexPath]
+    stdout: StdioCollector {
+      id: indexOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var text = root.boundedText(indexOut, exitCode, root.maxIndexBytes)
+      if (text === "" && exitCode === 0 && indexOut.text.length >= root.maxIndexBytes) {
+        console.warn("omarci: index.json exceeds", root.maxIndexBytes, "bytes")
+        root.jobs = []
+        return
+      }
+      if (text === "") {
+        root.jobs = []
+        return
+      }
+      root.parse(text)
+    }
+  }
+
+  Process {
+    id: settingsReader
+    command: ["head", "-c", String(root.maxSettingsBytes), root.settingsPath]
+    stdout: StdioCollector {
+      id: settingsOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var text = root.boundedText(settingsOut, exitCode, root.maxSettingsBytes)
+      if (text === "") {
+        root.notify = true
+        return
+      }
+      root.parseSettings(text)
+    }
   }
 
   Process {
