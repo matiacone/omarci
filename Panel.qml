@@ -71,8 +71,13 @@ Panel {
     return out
   }
 
-  readonly property var selected: items.length === 0 ? null
-    : items[Math.max(0, Math.min(selectedIndex, items.length - 1))]
+  readonly property var selected: itemAt(selectedIndex)
+
+  // Change handlers read the run through this, not `selected`: inside
+  // onSelectedIndexChanged that binding still holds the previous run.
+  function itemAt(index) {
+    return items.length === 0 ? null : items[Math.max(0, Math.min(index, items.length - 1))]
+  }
   readonly property var selectedRun: selected ? selected.run : null
   readonly property bool selectedFailed: {
     var st = ci && selectedRun ? ci.runState(selectedRun) : ""
@@ -103,11 +108,17 @@ Panel {
   property string shownLogHtml: ""
   property var pendingItem: null    // the run being fetched
   property bool loading: false
-  property var detailCache: ({})    // finished runs seen this session, by runKey
+  property var detailCache: ({})    // finished runs' details, by cacheKey
 
+  // Identifies what the pane shows; a running run's key changes as it moves.
   function runKey(item) {
     if (!item) return ""
     return item.repo + "#" + item.run.id + "#" + item.run.attempt + "#" + item.run.status + "#" + item.run.updatedAt
+  }
+
+  // A finished run attempt's details never change: the cache key.
+  function cacheKey(item) {
+    return item ? item.repo + "#" + item.run.id + "#" + item.run.attempt : ""
   }
 
   function isFinished(detail) {
@@ -129,12 +140,13 @@ Panel {
     clampIndex()
   }
 
-  // Mouse wheels move ~3 lines a notch; touchpads report exact pixels.
-  function wheelScroll(flick, event) {
-    var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * Style.space(60)
+  // A wheel notch moves about eight lines; a touchpad moves with the fingers,
+  // a little faster than 1:1. Flickable's own wheel handling crawls.
+  function wheelScroll(flick, wheel) {
+    var dy = wheel.pixelDelta.y !== 0 ? wheel.pixelDelta.y * 2 : wheel.angleDelta.y / 120 * Style.space(120)
     var max = Math.max(0, flick.contentHeight - flick.height)
     flick.contentY = Math.max(0, Math.min(max, flick.contentY - dy))
-    event.accepted = true
+    wheel.accepted = true
   }
 
   function runColor(run) {
@@ -226,26 +238,38 @@ Panel {
     detailFlick.contentY = shownLogHtml === "" ? 0 : max
   }
 
+  function cachedDetail(item) {
+    if (!item || item.run.status !== "completed") return null
+    return detailCache[cacheKey(item)] || null
+  }
+
+  // Shows the selection now if its details are cached; otherwise fetches
+  // them. One fetch runs at a time: when it ends, whatever is selected by
+  // then is fetched next, so fast j/k never strands the pane on an old run.
   function refreshDetail(force) {
-    var item = selected
+    var item = itemAt(selectedIndex)
     if (!item || !ci) {
       shown = null
       shownDetail = null
       shownLogHtml = ""
       return
     }
-    var key = runKey(item)
-    var cached = detailCache[key]
-    if (cached && !force) {
+    var cached = force ? null : cachedDetail(item)
+    if (cached) {
       show(item, cached, false)
       return
     }
-    if (detailProc.running && runKey(pendingItem) === key) return
+    if (detailProc.running) return
     pendingItem = item
     loading = true
-    if (detailProc.running) detailProc.running = false
     detailProc.command = [ci.cliPath, "gh", "view", String(item.repo), String(item.run.id)]
     detailProc.running = true
+  }
+
+  function loadCache() {
+    if (!ci || cachedProc.running) return
+    cachedProc.command = [ci.cliPath, "gh", "cached"]
+    cachedProc.running = true
   }
 
   function openSelected() {
@@ -292,6 +316,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       clampIndex()
+      loadCache()
       refreshDetail(false)
       if (ci) ci.syncGithub()
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -322,23 +347,44 @@ Panel {
     onExited: function(code) {
       root.loading = false
       var item = root.pendingItem
-      if (code !== 0 || !item) return
-      var detail
-      try {
-        detail = JSON.parse(String(detailOut.text || ""))
-      } catch (e) {
-        console.warn("omarci: bad run detail", e)
-        return
+      var detail = null
+      if (code === 0 && item) {
+        try {
+          detail = JSON.parse(String(detailOut.text || ""))
+        } catch (e) {
+          console.warn("omarci: bad run detail", e)
+        }
       }
-      var key = root.runKey(item)
-      if (root.isFinished(detail)) {
+      if (detail && root.isFinished(detail) && item.run.status === "completed") {
         var next = Object.assign({}, root.detailCache)
-        next[key] = detail
+        next[root.cacheKey(item)] = detail
         root.detailCache = next
       }
-      // A reply for a run no longer selected only fills the cache.
-      if (root.runKey(root.selected) !== key) return
-      root.show(item, detail, true)
+      if (detail && root.runKey(root.itemAt(root.selectedIndex)) === root.runKey(item)) {
+        root.show(item, detail, true)
+        return
+      }
+      // The selection moved while this fetch ran: catch up with it.
+      Qt.callLater(function() { root.refreshDetail(false) })
+    }
+  }
+
+  Process {
+    id: cachedProc
+    stdout: StdioCollector {
+      id: cachedOut
+      waitForEnd: true
+    }
+    onExited: function(code) {
+      if (code !== 0) return
+      try {
+        var loaded = JSON.parse(String(cachedOut.text || "{}"))
+        root.detailCache = Object.assign(loaded, root.detailCache)
+      } catch (e) {
+        console.warn("omarci: bad cached views", e)
+        return
+      }
+      if (!root.shown || root.runKey(root.shown) !== root.runKey(root.itemAt(root.selectedIndex))) root.refreshDetail(false)
     }
   }
 
@@ -525,10 +571,13 @@ Panel {
             interactive: contentHeight > height
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            WheelHandler {
-              target: null
-              acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-              onWheel: function(event) { root.wheelScroll(listFlick, event) }
+            // Takes the wheel before the Flickable does; clicks pass through.
+            MouseArea {
+              parent: listFlick
+              anchors.fill: parent
+              z: 2
+              acceptedButtons: Qt.NoButton
+              onWheel: function(wheel) { root.wheelScroll(listFlick, wheel) }
             }
 
             Column {
@@ -731,10 +780,13 @@ Panel {
               interactive: contentHeight > height
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-              WheelHandler {
-                target: null
-                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-                onWheel: function(event) { root.wheelScroll(detailFlick, event) }
+              // Takes the wheel before the Flickable does; clicks pass through.
+              MouseArea {
+                parent: detailFlick
+                anchors.fill: parent
+                z: 2
+                acceptedButtons: Qt.NoButton
+                onWheel: function(wheel) { root.wheelScroll(detailFlick, wheel) }
               }
 
               Column {

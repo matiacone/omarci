@@ -104,6 +104,8 @@ jobs_json failure
   and .jobs[0].steps[0].name == "Test" and .jobs[0].completedAt > .jobs[0].startedAt' >/dev/null \
   || fail "gh view of a failed run should carry the failed jobs' log"
 [[ -f $OMARCI_DIR/runs/Acme__App/42-1.json ]] || fail "a finished run's view should be cached"
+"$CLI" gh cached | jq -e '.["Acme/App#42#1"].logKind == "failed"' >/dev/null \
+  || fail "gh cached should return every cached view keyed repo#id#attempt"
 calls_before=$(grep -c '^run view' "$FAKE_GH/calls")
 "$CLI" gh view Acme/App 42 | jq -e '.logKind == "failed"' >/dev/null || fail "the cached view changed"
 [[ $(grep -c '^run view' "$FAKE_GH/calls") == "$calls_before" ]] || fail "a cached view should not call gh"

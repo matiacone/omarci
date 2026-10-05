@@ -27,6 +27,7 @@ Usage:
   omarci gh cancel OWNER/REPO RUN_ID
   omarci gh log OWNER/REPO RUN_ID [--all]
   omarci gh view OWNER/REPO RUN_ID
+  omarci gh cached
 
 Uses the GitHub CLI (`gh`) and its login. State lives in
 $XDG_STATE_HOME/omarci (override with OMARCI_DIR). `gh sync` writes the
@@ -289,6 +290,27 @@ gh_view() {
   printf '%s\n' "$out"
 }
 
+# Every cached view of a run github.json lists, as one JSON object keyed
+# "OWNER/REPO#RUN_ID#ATTEMPT", so the widget can hold them all in memory.
+gh_cached() {
+  require_jq
+  [[ -f $GITHUB ]] || { printf '{}\n'; return; }
+  local repo id attempt file
+  local -a files=() keys=()
+  while IFS=$'\t' read -r repo id attempt; do
+    file=$(view_cache_path "$repo" "$id" "$attempt")
+    [[ -f $file ]] || continue
+    files+=("$file")
+    keys+=("$repo#$id#$attempt")
+  done < <(jq -r '.repos[] | .repo as $r | .runs[] | select(.status == "completed") | "\($r)\t\(.id)\t\(.attempt)"' "$GITHUB")
+  if (( ${#files[@]} == 0 )); then printf '{}\n'; return; fi
+  local i out='{}'
+  for i in "${!files[@]}"; do
+    out=$(jq --arg k "${keys[i]}" --slurpfile v "${files[i]}" '. + {($k): $v[0]}' <<<"$out")
+  done
+  printf '%s\n' "$out"
+}
+
 # Fills the cache for the newest finished runs, one at a time and at most one
 # prefetcher at once, so a click on a recent run is answered from disk. Drops
 # cached views older than a week.
@@ -312,6 +334,7 @@ cmd_gh() {
   case $sub in
     sync) gh_sync; return ;;
     prefetch) gh_prefetch; return ;;
+    cached) gh_cached; return ;;
     -h|--help|"") usage; return ;;
   esac
   require_gh
