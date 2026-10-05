@@ -106,7 +106,10 @@ Panel {
   property var runDetail: null
   property string runDetailKey: ""
   property bool runDetailLoading: false
-  property var logLines: []
+  // The log as one StyledText block: one item instead of hundreds of lines.
+  property string logHtml: ""
+  // Finished runs' details already seen this session, by runKey.
+  property var detailCache: ({})
 
   function runKey(item) {
     if (!item || item.kind !== "run") return ""
@@ -122,6 +125,14 @@ Panel {
     cursorActive = true
     if (items.length === 0) return
     selectedIndex = Math.max(0, Math.min(items.length - 1, selectedIndex + dy))
+  }
+
+  // Mouse wheels move ~3 lines a notch; touchpads report exact pixels.
+  function wheelScroll(flick, event) {
+    var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * Style.space(60)
+    var max = Math.max(0, flick.contentHeight - flick.height)
+    flick.contentY = Math.max(0, Math.min(max, flick.contentY - dy))
+    event.accepted = true
   }
 
   function select(index) {
@@ -198,23 +209,46 @@ Panel {
     return "plain"
   }
 
+  function escapeHtml(t) {
+    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  }
+
   function rebuildLog(text) {
-    if (String(text || "").trim() === "") { logLines = []; return }
+    if (String(text || "").trim() === "") { logHtml = ""; return }
     var raw = stripAnsi(text).replace(/\r/g, "").split("\n")
-    var lines = []
+    var errorColor = String(urgent)
+    var dimColor = String(dim)
+    var out = []
     var blanks = 0
-    for (var i = 0; i < raw.length && lines.length < 300; i++) {
+    for (var i = 0; i < raw.length && out.length < 300; i++) {
       var line = tidyLine(raw[i]).replace(/[ \t]+$/g, "")
       if (line.length > 2048) line = line.substring(0, 2048)
       if (line === "") {
         if (++blanks > 1) continue
-        lines.push({ text: " ", kind: "plain" })
+        out.push("")
         continue
       }
       blanks = 0
-      lines.push({ text: line, kind: lineKind(line) })
+      var kind = lineKind(line)
+      // Keep indentation: StyledText collapses runs of spaces.
+      var html = escapeHtml(line).replace(/^ +/, function(m) { return Array(m.length + 1).join("&nbsp;") })
+        .replace(/  /g, " &nbsp;")
+      if (kind === "error") html = "<font color=\"" + errorColor + "\">" + html + "</font>"
+      else if (kind === "ok" || kind === "section") html = "<font color=\"" + dimColor + "\">" + html + "</font>"
+      out.push(html)
     }
-    logLines = lines
+    logHtml = out.join("<br>")
+  }
+
+  // Shows new detail content only once it is laid out and scrolled to its
+  // end, so the pane never visibly jumps.
+  function showDetail(apply) {
+    detailFlick.opacity = 0
+    apply()
+    Qt.callLater(function() {
+      root.scrollDetailToEnd()
+      detailFlick.opacity = 1
+    })
   }
 
   function refreshDetail() {
@@ -222,14 +256,14 @@ Panel {
     if (!item || !ci) {
       runDetail = null
       runDetailKey = ""
-      logLines = []
+      logHtml = ""
       return
     }
     if (item.kind === "job") {
       runDetail = null
       runDetailKey = ""
       var path = ci.safeLogPath(item.job)
-      if (path === "") { logLines = []; return }
+      if (path === "") { logHtml = ""; return }
       if (tailProc.running) tailProc.running = false
       tailProc.command = [
         "bash", "-c",
@@ -241,9 +275,18 @@ Panel {
     }
     var key = runKey(item)
     if (key === runDetailKey && runDetail) return
+    var cached = detailCache[key]
+    if (cached) {
+      runDetailKey = key
+      showDetail(function() {
+        root.runDetail = cached
+        root.rebuildLog(cached.log || "")
+      })
+      return
+    }
     if (key !== runDetailKey) {
       runDetail = null
-      logLines = []
+      logHtml = ""
     }
     runDetailKey = key
     runDetailLoading = true
@@ -254,28 +297,29 @@ Panel {
 
   // A log's verdict, or its error, is at the end.
   function scrollDetailToEnd() {
-    if (logLines.length === 0) { detailFlick.contentY = 0; return }
+    if (logHtml === "") { detailFlick.contentY = 0; return }
     detailFlick.contentY = Math.max(0, detailFlick.contentHeight - detailFlick.height)
   }
 
-  function activateSelected() {
+  readonly property bool canRetry: selectedRun !== null && selectedRun.status === "completed"
+  readonly property bool canCancel: selectedRun !== null && ci !== null && ci.runIsActive(selectedRun)
+
+  // Open: the run on github.com, or a local job's log in a terminal.
+  function openSelected() {
     if (!ci || !selected) return
     if (runSelected) ci.openRun(selected.repo, selectedRun.id)
     else ci.openLog(selectedJob.id)
   }
 
-  function openLogInTerminal() {
-    if (!ci || !selected) return
-    if (runSelected) ci.openRunLog(selected.repo, selectedRun.id, !runFailed)
-    else ci.openLog(selectedJob.id)
+  // Retry: the failed jobs of a failed run, the whole run otherwise.
+  function retrySelected() {
+    if (!ci || !canRetry) return
+    if (runFailed) ci.rerunFailed(selected.repo, selectedRun.id)
+    else ci.rerunAll(selected.repo, selectedRun.id)
   }
 
-  function refresh() {
-    if (!ci) return
-    ci.reload()
-    ci.syncGithub()
-    runDetailKey = ""
-    refreshDetail()
+  function cancelSelected() {
+    if (ci && canCancel) ci.cancelRun(selected.repo, selectedRun.id)
   }
 
   function addRepoFromField() {
@@ -355,10 +399,22 @@ Panel {
       if (code !== 0) return
       try {
         var parsed = JSON.parse(String(detailOut.text || ""))
-        var fresh = !root.runDetail
-        root.runDetail = parsed
-        root.rebuildLog(parsed.log || "")
-        if (fresh) Qt.callLater(root.scrollDetailToEnd)
+        var key = root.runDetailKey
+        var finished = Array.isArray(parsed.jobs) && parsed.jobs.length > 0
+          && parsed.jobs.every(function(j) { return j.status === "completed" })
+        if (finished) {
+          var next = Object.assign({}, root.detailCache)
+          next[key] = parsed
+          root.detailCache = next
+        }
+        var first = !root.runDetail
+        var apply = function() {
+          root.runDetail = parsed
+          root.rebuildLog(parsed.log || "")
+        }
+        // A live refresh of the same run keeps the reader's scroll position.
+        if (first) root.showDetail(apply)
+        else apply()
       } catch (e) {
         console.warn("omarci: bad run detail", e)
       }
@@ -371,8 +427,8 @@ Panel {
       id: tailOut
       waitForEnd: true
       onStreamFinished: {
-        root.rebuildLog(String(tailOut.text || ""))
-        Qt.callLater(root.scrollDetailToEnd)
+        var text = String(tailOut.text || "")
+        root.showDetail(function() { root.rebuildLog(text) })
       }
     }
   }
@@ -398,8 +454,7 @@ Panel {
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dy)
       }
-      onActivateRequested: if (!root.settingsOpen) root.activateSelected()
-      onDeleteRequested: if (!root.settingsOpen && root.jobSelected && root.ci) root.ci.dismiss(root.selectedJob.id)
+      onActivateRequested: if (!root.settingsOpen) root.openSelected()
       onCloseRequested: {
         if (root.settingsOpen) root.setSettingsOpen(false)
         else root.close()
@@ -407,13 +462,9 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         if (t === "s" || t === "S") { root.setSettingsOpen(!root.settingsOpen); return }
-        if (root.settingsOpen || !root.ci) return
-        if (t === "r") { root.refresh(); return }
-        if (t === "l") { root.openLogInTerminal(); return }
-        if (t === "d" || t === "D") { root.ci.clearFinished(); return }
-        if (!root.runSelected) return
-        if (t === "R") root.ci.rerunFailed(root.selected.repo, root.selectedRun.id)
-        else if (t === "c") root.ci.cancelRun(root.selected.repo, root.selectedRun.id)
+        if (root.settingsOpen) return
+        if (t === "r" || t === "R") root.retrySelected()
+        else if (t === "c" || t === "C") root.cancelSelected()
       }
 
       ColumnLayout {
@@ -447,57 +498,29 @@ Panel {
             spacing: Style.space(6)
 
             Button {
-              visible: !root.settingsOpen && root.runSelected
+              visible: !root.settingsOpen && root.selected !== null
               text: "Open"
-              tooltipText: "Open on github.com (Enter)"
+              tooltipText: root.runSelected ? "Open the run on github.com (Enter)" : "Open the log in a terminal (Enter)"
               bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
-              onClicked: root.ci.openRun(root.selected.repo, root.selectedRun.id)
+              onClicked: root.openSelected()
             }
             Button {
-              visible: !root.settingsOpen && root.runSelected
-                && (root.runFailed || root.runState === "cancelled")
-              text: "Re-run failed"
-              tooltipText: "Re-run the failed jobs (R)"
+              visible: !root.settingsOpen && root.canRetry
+              text: "Retry"
+              tooltipText: root.runFailed ? "Re-run the failed jobs (r)" : "Re-run the whole run (r)"
               bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
-              onClicked: root.ci.rerunFailed(root.selected.repo, root.selectedRun.id)
+              onClicked: root.retrySelected()
             }
             Button {
-              visible: !root.settingsOpen && root.selectedRun !== null && root.selectedRun.status === "completed"
-              text: "Re-run all"
-              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
-              onClicked: root.ci.rerunAll(root.selected.repo, root.selectedRun.id)
-            }
-            Button {
-              visible: !root.settingsOpen && root.selectedRun !== null && root.ci && root.ci.runIsActive(root.selectedRun)
+              visible: !root.settingsOpen && root.canCancel
               text: "Cancel"
               tooltipText: "Cancel the run (c)"
               bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
-              onClicked: root.ci.cancelRun(root.selected.repo, root.selectedRun.id)
+              onClicked: root.cancelSelected()
             }
             Button {
-              visible: !root.settingsOpen && root.selected !== null
-                && (root.jobSelected || (root.selectedRun !== null && root.selectedRun.status === "completed"))
-              text: "Full log"
-              tooltipText: "Open the log in a terminal (l)"
-              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
-              onClicked: root.openLogInTerminal()
-            }
-            Button {
-              visible: !root.settingsOpen && root.jobSelected
-              text: "Dismiss"
-              tooltipText: "Dismiss this job (x)"
-              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
-              onClicked: root.ci.dismiss(root.selectedJob.id)
-            }
-            Button {
-              visible: !root.settingsOpen && root.jobs.length > 0
-              text: "Clear finished"
-              tooltipText: "Dismiss every finished local job (d)"
-              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
-              onClicked: root.ci.clearFinished()
-            }
-            Button {
-              text: root.settingsOpen ? "Done" : "Settings"
+              text: root.settingsOpen ? "Done" : ""
+              iconText: root.settingsOpen ? "" : "󰒓"
               tooltipText: root.settingsOpen ? "Back (s)" : "Watched repos and notifications (s)"
               bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
               onClicked: root.setSettingsOpen(!root.settingsOpen)
@@ -609,6 +632,12 @@ Panel {
             flickableDirection: Flickable.VerticalFlick
             interactive: contentHeight > height
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+            WheelHandler {
+              target: null
+              acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+              onWheel: function(event) { root.wheelScroll(listFlick, event) }
+            }
 
             Column {
               id: listColumn
@@ -758,7 +787,7 @@ Panel {
                         MouseArea {
                           anchors.fill: parent
                           onClicked: root.select(runRow.flatIndex)
-                          onDoubleClicked: if (root.ci) root.ci.openRun(card.modelData.repo, runRow.modelData.id)
+                          onDoubleClicked: root.openSelected()
                         }
                       }
                     }
@@ -854,7 +883,7 @@ Panel {
                       MouseArea {
                         anchors.fill: parent
                         onClicked: root.select(jobRow.flatIndex)
-                        onDoubleClicked: if (root.ci) root.ci.openLog(jobRow.modelData.id)
+                        onDoubleClicked: root.openSelected()
                       }
                     }
                   }
@@ -893,6 +922,12 @@ Panel {
               flickableDirection: Flickable.VerticalFlick
               interactive: contentHeight > height
               ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+              WheelHandler {
+                target: null
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                onWheel: function(event) { root.wheelScroll(detailFlick, event) }
+              }
 
               Column {
                 id: detailColumn
@@ -977,7 +1012,7 @@ Panel {
                 // The run's jobs and their steps.
                 Text {
                   visible: root.runSelected && root.runDetailLoading && !root.runDetail
-                  text: "Loading jobs…"
+                  text: "Loading jobs and log…"
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -1022,7 +1057,7 @@ Panel {
                 }
 
                 PanelSectionHeader {
-                  visible: root.logLines.length > 0
+                  visible: root.logHtml !== ""
                   text: root.runSelected && root.runDetail && root.runDetail.logKind === "failed" ? "FAILED JOBS' LOG" : "LOG"
                   foreground: root.foreground
                   fontFamily: root.fontFamily
@@ -1039,27 +1074,22 @@ Panel {
                 }
 
                 Text {
-                  visible: root.jobSelected && root.logLines.length === 0
+                  visible: root.jobSelected && root.logHtml === ""
                   text: "No log yet."
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
 
-                Repeater {
-                  model: root.logLines
-                  delegate: Text {
-                    required property var modelData
-                    width: detailColumn.width
-                    text: modelData.text
-                    color: modelData.kind === "error" ? root.urgent
-                      : (modelData.kind === "ok" || modelData.kind === "section") ? root.dim
-                      : root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: modelData.kind === "section"
-                    wrapMode: Text.Wrap
-                  }
+                Text {
+                  visible: root.logHtml !== ""
+                  width: detailColumn.width
+                  text: root.logHtml
+                  textFormat: Text.StyledText
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.Wrap
                 }
               }
             }
@@ -1070,7 +1100,7 @@ Panel {
           Layout.fillWidth: true
           text: root.settingsOpen
             ? "Enter adds a repo · s / Esc back"
-            : "j/k select · Enter open · R re-run failed · c cancel · l full log · x dismiss job · d clear jobs · r refresh · s settings · Esc close"
+            : "j/k select · Enter open · r retry · c cancel · s settings · Esc close"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

@@ -618,6 +618,10 @@ gh_sync() {
     '{version: 1, me: $me, fetchedAt: $now, repos: $repos}' | write_github
   release
 
+  if [[ ${OMARCI_PREFETCH:-8} != 0 ]]; then
+    ( "$SELF" gh prefetch </dev/null >/dev/null 2>&1 & )
+  fi
+
   # A run of yours that was unfinished last sync and is finished now.
   [[ -n $me ]] || return 0
   local finished line
@@ -640,9 +644,8 @@ gh_sync() {
 # a job failed, else the whole run's once it finished; GitHub has no log for a
 # run still in progress), as one JSON object for the widget's detail pane.
 # Bounded: the last 300 lines, capped at MAX_LOG_BYTES.
-gh_view() {
-  local repo=$1 id=$2 jobs log=""
-  require_jq
+fetch_view() {
+  local repo=$1 id=$2 jobs log="" which=""
   jobs=$(gh run view "$id" -R "$repo" --json jobs --jq '[.jobs[] | {
     name, status, conclusion,
     startedAt: ((.startedAt // "") | if . == "" or startswith("0001") then null else fromdateiso8601 end),
@@ -650,7 +653,6 @@ gh_view() {
     url,
     steps: [.steps[]? | {number, name, status, conclusion}]
   }]')
-  local which=""
   if jq -e 'any(.[]; .conclusion == "failure" or .conclusion == "timed_out")' >/dev/null <<<"$jobs"; then
     which=failed
     log=$( { gh run view "$id" -R "$repo" --log-failed 2>/dev/null || true; } | tail -n 300 | head -c "$MAX_LOG_BYTES")
@@ -661,10 +663,63 @@ gh_view() {
   jq -n --argjson jobs "$jobs" --arg log "$log" --arg which "$which" '{jobs: $jobs, log: $log, logKind: $which}'
 }
 
+# A finished run attempt never changes, so its view is cached on disk and a
+# second look costs no request. Unfinished runs are always fetched.
+view_cache_path() { # $1 repo, $2 run id, $3 attempt
+  printf '%s/runs/%s/%s-%s.json' "$OMARCI_DIR" "${1//\//__}" "$2" "$3"
+}
+
+finished_attempt() { # $1 repo, $2 run id -> the attempt, when github.json says it finished
+  [[ -f $GITHUB ]] || return 1
+  jq -er --arg r "$1" --argjson id "$2" '
+    first(.repos[] | select((.repo | ascii_downcase) == ($r | ascii_downcase)) | .runs[]
+      | select(.id == $id and .status == "completed") | .attempt)' "$GITHUB" 2>/dev/null
+}
+
+gh_view() {
+  local repo=$1 id=$2 attempt cache out
+  require_jq
+  if attempt=$(finished_attempt "$repo" "$id"); then
+    cache=$(view_cache_path "$repo" "$id" "$attempt")
+    if [[ -f $cache ]]; then
+      head -c 1048576 -- "$cache"
+      return
+    fi
+  fi
+  out=$(fetch_view "$repo" "$id")
+  if [[ -n ${cache:-} ]] && jq -e '.jobs | length > 0 and all(.[]; .status == "completed")' >/dev/null <<<"$out"; then
+    mkdir -p -- "${cache%/*}"
+    local tmp
+    tmp=$(mktemp "${cache%/*}/view.XXXXXX")
+    printf '%s\n' "$out" >"$tmp"
+    mv "$tmp" "$cache"
+  fi
+  printf '%s\n' "$out"
+}
+
+# Fills the cache for the newest finished runs, one at a time and at most one
+# prefetcher at once, so a click on a recent run is answered from disk. Drops
+# cached views older than a week.
+gh_prefetch() {
+  ensure_dirs
+  exec 8>"$OMARCI_DIR/prefetch.lock"
+  flock -n 8 || return 0
+  local repo id attempt n=0
+  while IFS=$'\t' read -r repo id attempt; do
+    [[ -n $repo ]] || continue
+    [[ -f $(view_cache_path "$repo" "$id" "$attempt") ]] && continue
+    gh_view "$repo" "$id" >/dev/null 2>&1 || true
+    (( ++n >= ${OMARCI_PREFETCH:-8} )) && break
+  done < <(jq -r '[.repos[] | .repo as $r | .runs[] | select(.status == "completed") | [$r, .id, .attempt, .updatedAt]]
+    | sort_by(-.[3]) | .[] | "\(.[0])\t\(.[1])\t\(.[2])"' "$GITHUB" 2>/dev/null)
+  find "$OMARCI_DIR/runs" -type f -name '*.json' -mtime +7 -delete 2>/dev/null || true
+}
+
 cmd_gh() {
   local sub=${1:-} repo=${2:-} id=${3:-}
   case $sub in
     sync) gh_sync; return ;;
+    prefetch) gh_prefetch; return ;;
     -h|--help|"") usage; return ;;
   esac
   require_gh

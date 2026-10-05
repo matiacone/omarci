@@ -6,6 +6,7 @@ CLI=$ROOT/bin/omarci
 export OMARCI_DIR
 OMARCI_DIR=$(mktemp -d)
 export OMARCI_NOTIFY=0
+export OMARCI_PREFETCH=0
 trap 'rm -rf "$OMARCI_DIR"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -156,6 +157,12 @@ jobs_json failure
 "$CLI" gh view Acme/App 42 | jq -e '.logKind == "failed" and (.log | contains("boom"))
   and .jobs[0].steps[0].name == "Test" and .jobs[0].completedAt > .jobs[0].startedAt' >/dev/null \
   || fail "gh view of a failed run should carry the failed jobs' log"
+[[ -f $OMARCI_DIR/runs/Acme__App/42-1.json ]] || fail "a finished run's view should be cached"
+calls_before=$(grep -c '^run view' "$FAKE_GH/calls")
+"$CLI" gh view Acme/App 42 | jq -e '.logKind == "failed"' >/dev/null || fail "the cached view changed"
+[[ $(grep -c '^run view' "$FAKE_GH/calls") == "$calls_before" ]] || fail "a cached view should not call gh"
+
+rm -rf "$OMARCI_DIR/runs"
 jobs_json success
 "$CLI" gh view Acme/App 42 | jq -e '.logKind == "all" and (.log | contains("all good"))' >/dev/null \
   || fail "gh view of a passed run should carry the run's log"

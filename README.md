@@ -33,19 +33,17 @@ omarci repos              # list
 
 The panel is one view. Down the left, a card per watched repo with its latest 10 runs (status, workflow, branch, commit title, how long ago), then your local jobs. On the right, the selected run's jobs and steps and the tail of its log (the failed jobs' log when something failed), or the selected local job's log. The actions for the selection sit top right. The widget refreshes every 15 s while a run is in progress and every minute otherwise.
 
-| Key | Action |
-| --- | --- |
-| `j` / `k` | Select a run or job |
-| `Enter` | Open the run on github.com, or the job's log |
-| `R` | Re-run failed jobs |
-| `c` | Cancel a running run |
-| `l` | Full log in a terminal |
-| `x` | Dismiss a local job |
-| `d` | Dismiss all finished local jobs |
-| `r` | Refresh now |
-| `s` | Settings (watched repos, notifications) |
+Top right, three actions for the selection:
 
-The buttons top right do the same, plus **Re-run all**. The same actions work from a terminal:
+| Button | Key | Does |
+| --- | --- | --- |
+| **Open** | `Enter` | The run on github.com, or a local job's log in a terminal |
+| **Retry** | `r` | Re-runs a failed run's failed jobs, or the whole run otherwise |
+| **Cancel** | `c` | Cancels a run in progress |
+
+`j` / `k` select, `s` opens settings (the gear), `Esc` closes. A finished run's details are cached, and the newest ones are fetched ahead in the background, so selecting a run is instant.
+
+The same actions work from a terminal:
 
 ```bash
 omarci gh sync                              # refresh now
@@ -53,7 +51,7 @@ omarci gh open owner/repo RUN_ID
 omarci gh rerun owner/repo RUN_ID [--failed]
 omarci gh cancel owner/repo RUN_ID
 omarci gh log owner/repo RUN_ID [--all]     # failed jobs' log, or all of it
-omarci gh view owner/repo RUN_ID            # jobs, steps and log tail as JSON
+omarci gh view owner/repo RUN_ID            # jobs, steps and log tail as JSON (cached once finished)
 ```
 
 ## Local jobs
