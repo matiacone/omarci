@@ -35,7 +35,7 @@ case "$1 $2" in
   "run view")
     if [[ " $* " == *" --json "* ]]; then body=$(cat "$FAKE_GH/jobs.json")
     elif [[ " $* " == *" --log-failed "* ]]; then printf 'ci\tTest\t2026-10-05T10:00:59Z boom\n'; exit 0
-    else printf 'ci\tTest\t2026-10-05T10:00:59Z all good\nci\tPost Run actions/checkout@v4\t2026-10-05T10:01:00Z cleanup noise\n'; exit 0
+    else printf 'ci\tTest\t2026-10-05T10:00:59Z all good\nci\tUNKNOWN STEP\t2026-10-05T10:01:00Z Post job cleanup.\nci\tUNKNOWN STEP\t2026-10-05T10:01:01Z cleanup noise\n'; exit 0
     fi ;;
   *) echo "fake gh: unexpected $*" >&2; exit 2 ;;
 esac

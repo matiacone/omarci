@@ -245,10 +245,12 @@ fetch_view() {
     log=$( { gh run view "$id" -R "$repo" --log-failed 2>/dev/null || true; } | tail -n 300 | head -c "$MAX_LOG_BYTES")
   elif jq -e 'length > 0 and all(.[]; .status == "completed")' >/dev/null <<<"$jobs"; then
     which=all
-    # The run's own output: GitHub's setup and post-job cleanup steps end every
-    # log and would fill the tail.
+    # The run's own output: GitHub's post-job cleanup steps end every log and
+    # would fill the tail. They start at the first "Post job cleanup." line;
+    # gh often labels their step UNKNOWN STEP, so the step name can't be used.
     log=$( { gh run view "$id" -R "$repo" --log 2>/dev/null || true; } \
-      | awk -F'\t' '$2 !~ /^(Set up job|Complete job|Post )/' | tail -n 300 | head -c "$MAX_LOG_BYTES")
+      | awk -F'\t' '/Post job cleanup\./ { exit } $2 !~ /^(Set up job|Complete job|Post )/' \
+      | tail -n 300 | head -c "$MAX_LOG_BYTES")
   fi
   jq -n --argjson jobs "$jobs" --arg log "$log" --arg which "$which" '{jobs: $jobs, log: $log, logKind: $which}'
 }
