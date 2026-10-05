@@ -140,10 +140,12 @@ Panel {
     clampIndex()
   }
 
-  // A wheel notch moves about eight lines; a touchpad moves with the fingers,
-  // a little faster than 1:1. Flickable's own wheel handling crawls.
+  // A wheel notch moves about nine lines. A touchpad's pixels arrive already
+  // scaled down by Hyprland's touchpad scroll_factor (Omarchy ships 0.4), so
+  // they are multiplied back up to about twice the finger's travel.
+  // Flickable's own wheel handling crawls.
   function wheelScroll(flick, wheel) {
-    var dy = wheel.pixelDelta.y !== 0 ? wheel.pixelDelta.y * 2 : wheel.angleDelta.y / 120 * Style.space(120)
+    var dy = wheel.pixelDelta.y !== 0 ? wheel.pixelDelta.y * 5 : wheel.angleDelta.y / 120 * Style.space(120)
     var max = Math.max(0, flick.contentHeight - flick.height)
     flick.contentY = Math.max(0, Math.min(max, flick.contentY - dy))
     wheel.accepted = true
