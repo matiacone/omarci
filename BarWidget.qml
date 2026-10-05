@@ -66,7 +66,7 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function refresh(): void { if (root.ci) root.ci.reload() }
+    function refresh(): void { if (root.ci) root.ci.syncGithub() }
   }
 
   BarIconButton {
@@ -89,7 +89,7 @@ BarWidget {
       }
     }
     onPressed: function(buttonCode) {
-      if (buttonCode === Qt.MiddleButton && root.ci) root.ci.reload()
+      if (buttonCode === Qt.MiddleButton && root.ci) root.ci.syncGithub()
       else root.toggle()
     }
   }

@@ -8,8 +8,8 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// One panel: every watched repo's runs and the local jobs down the left, the
-// selected item's jobs, steps and log on the right, its actions top right.
+// One panel: each watched repo's runs down the left, the selected run's jobs,
+// steps and log on the right, Open / Retry / Cancel top right.
 Panel {
   id: root
   moduleName: "io.github.matiacone.omarci"
@@ -41,14 +41,11 @@ Panel {
   readonly property color cardBorder: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.10)
 
   property int selectedIndex: 0
-  property bool cursorActive: false
   property bool settingsOpen: false
 
-  // ---- The list: runs per watched repo, then local jobs ----------------
+  // ---- The list: each watched repo's runs ---------------------------------
 
-  readonly property var jobs: ci ? ci.visibleJobs() : []
-
-  readonly property var ghRepos: {
+  readonly property var repoCards: {
     if (!ci) return []
     var byName = {}
     var fetched = ci.github && ci.github.repos ? ci.github.repos : []
@@ -65,66 +62,71 @@ Panel {
     return out
   }
 
-  readonly property int runCount: {
-    var n = 0
-    for (var i = 0; i < ghRepos.length; i++) n += ghRepos[i].runs.length
-    return n
-  }
-
   readonly property var items: {
     var out = []
-    for (var i = 0; i < ghRepos.length; i++) {
-      var runs = ghRepos[i].runs
-      for (var j = 0; j < runs.length; j++) out.push({ kind: "run", repo: ghRepos[i].repo, run: runs[j] })
+    for (var i = 0; i < repoCards.length; i++) {
+      var runs = repoCards[i].runs
+      for (var j = 0; j < runs.length; j++) out.push({ repo: repoCards[i].repo, run: runs[j] })
     }
-    for (var k = 0; k < jobs.length; k++) out.push({ kind: "job", job: jobs[k] })
     return out
   }
 
   readonly property var selected: items.length === 0 ? null
     : items[Math.max(0, Math.min(selectedIndex, items.length - 1))]
-  readonly property bool runSelected: selected !== null && selected.kind === "run"
-  readonly property bool jobSelected: selected !== null && selected.kind === "job"
-  readonly property var selectedRun: runSelected ? selected.run : null
-  readonly property var selectedJob: jobSelected ? selected.job : null
-  readonly property string runState: ci && selectedRun ? ci.runState(selectedRun) : ""
-  readonly property bool runFailed: runState === "failure" || runState === "timed_out" || runState === "startup_failure"
+  readonly property var selectedRun: selected ? selected.run : null
+  readonly property bool selectedFailed: {
+    var st = ci && selectedRun ? ci.runState(selectedRun) : ""
+    return st === "failure" || st === "timed_out" || st === "startup_failure"
+  }
+  readonly property bool canRetry: selectedRun !== null && selectedRun.status === "completed"
+  readonly property bool canCancel: selectedRun !== null && ci !== null && ci.runIsActive(selectedRun)
 
   readonly property string heroMeta: {
     if (root.settingsOpen) return "settings"
     if (!ci) return ""
+    if (ci.repos.length === 0) return "no repos watched"
     var parts = []
-    if (ci.ghActiveCount > 0) parts.push(ci.ghActiveCount + " running")
-    if (ci.repos.length > 0) parts.push(ci.repos.length + (ci.repos.length === 1 ? " repo" : " repos"))
-    if (jobs.length > 0) parts.push(jobs.length + (jobs.length === 1 ? " local job" : " local jobs"))
-    return parts.length ? parts.join(" · ") : "nothing watched yet"
+    if (ci.activeCount > 0) parts.push(ci.activeCount + " running")
+    parts.push(ci.repos.length + (ci.repos.length === 1 ? " repo" : " repos"))
+    return parts.join(" · ")
   }
 
-  // ---- Detail pane state --------------------------------------------------
+  // ---- The detail pane ------------------------------------------------------
+  //
+  // The pane shows `shown`, not the selection: a click moves the highlight at
+  // once, and the pane swaps header, jobs and log together when the new run's
+  // details are ready, already scrolled to the log's end. Nothing blanks or
+  // blinks in between.
 
-  // Jobs and failed log of the selected run, from `omarci gh view`.
-  property var runDetail: null
-  property string runDetailKey: ""
-  property bool runDetailLoading: false
-  // The log as one StyledText block: one item instead of hundreds of lines.
-  property string logHtml: ""
-  // Finished runs' details already seen this session, by runKey.
-  property var detailCache: ({})
+  property var shown: null          // { repo, run } the pane displays
+  property var shownDetail: null    // its { jobs, log, logKind }
+  property string shownLogHtml: ""
+  property var pendingItem: null    // the run being fetched
+  property bool loading: false
+  property var detailCache: ({})    // finished runs seen this session, by runKey
 
   function runKey(item) {
-    if (!item || item.kind !== "run") return ""
-    return item.repo + "#" + item.run.id + "#" + item.run.updatedAt + "#" + item.run.status
+    if (!item) return ""
+    return item.repo + "#" + item.run.id + "#" + item.run.attempt + "#" + item.run.status + "#" + item.run.updatedAt
+  }
+
+  function isFinished(detail) {
+    return !!detail && Array.isArray(detail.jobs) && detail.jobs.length > 0
+      && detail.jobs.every(function(j) { return j.status === "completed" })
   }
 
   function clampIndex() {
-    if (items.length === 0) selectedIndex = 0
-    else selectedIndex = Math.max(0, Math.min(selectedIndex, items.length - 1))
+    selectedIndex = items.length === 0 ? 0 : Math.max(0, Math.min(selectedIndex, items.length - 1))
   }
 
   function moveCursor(dy) {
-    cursorActive = true
     if (items.length === 0) return
     selectedIndex = Math.max(0, Math.min(items.length - 1, selectedIndex + dy))
+  }
+
+  function select(index) {
+    selectedIndex = index
+    clampIndex()
   }
 
   // Mouse wheels move ~3 lines a notch; touchpads report exact pixels.
@@ -135,18 +137,8 @@ Panel {
     event.accepted = true
   }
 
-  function select(index) {
-    cursorActive = true
-    selectedIndex = index
-    clampIndex()
-  }
-
   function runColor(run) {
-    var st = ci ? ci.runState(run) : ""
-    if (st === "success") return success
-    if (st === "failure" || st === "timed_out" || st === "startup_failure") return urgent
-    if (st === "running" || st === "queued") return foreground
-    return dim
+    return colorFor(run ? run.status : "", run ? run.conclusion : "")
   }
 
   function glyphFor(status, conclusion) {
@@ -166,28 +158,8 @@ Panel {
     return dim
   }
 
-  function jobGlyph(job) {
-    if (!job) return "·"
-    if (job.status === "running") return ci ? ci.spinnerGlyph : "…"
-    if (job.status === "fail") return "✗"
-    if (job.status === "pass") return "✓"
-    return "·"
-  }
-
-  function jobColor(job) {
-    if (!job) return dim
-    if (job.status === "fail") return urgent
-    if (job.status === "pass") return success
-    return foreground
-  }
-
   function ago(sec) {
-    if (!ci || !sec) return ""
-    return ci.shortDuration(ci.nowSec - sec) + " ago"
-  }
-
-  function stripAnsi(s) {
-    return String(s || "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    return ci && sec ? ci.shortDuration(ci.nowSec - sec) + " ago" : ""
   }
 
   // GitHub's log lines are `job<TAB>step<TAB>timestamp text`; keep the text.
@@ -195,9 +167,7 @@ Panel {
     var s = String(line || "")
     var tab = s.lastIndexOf("\t")
     if (tab >= 0) s = s.substring(tab + 1)
-    s = s.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "")
-    var prefixed = s.match(/^(@?[\w./-]+(?::[\w@./-]+)+):\s(.*)$/)
-    if (prefixed) s = prefixed[2]
+    s = s.replace(/^\ufeff/, "").replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "")
     return s.replace(/^##\[(group|endgroup|command)\]/, "").replace(/^##\[error\]/, "error: ")
   }
 
@@ -213,9 +183,11 @@ Panel {
     return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   }
 
-  function rebuildLog(text) {
-    if (String(text || "").trim() === "") { logHtml = ""; return }
-    var raw = stripAnsi(text).replace(/\r/g, "").split("\n")
+  // The log as one StyledText block: one item instead of hundreds of lines.
+  function logHtmlFor(text) {
+    if (String(text || "").trim() === "") return ""
+    // Colour codes arrive as real escapes or, from GitHub, as literal "^[[…m".
+    var raw = String(text).replace(/(\x1b|\^\[)\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "").split("\n")
     var errorColor = String(urgent)
     var dimColor = String(dim)
     var out = []
@@ -237,84 +209,53 @@ Panel {
       else if (kind === "ok" || kind === "section") html = "<font color=\"" + dimColor + "\">" + html + "</font>"
       out.push(html)
     }
-    logHtml = out.join("<br>")
+    return out.join("<br>")
   }
 
-  // Shows new detail content only once it is laid out and scrolled to its
-  // end, so the pane never visibly jumps.
-  function showDetail(apply) {
-    detailFlick.opacity = 0
-    apply()
-    Qt.callLater(function() {
-      root.scrollDetailToEnd()
-      detailFlick.opacity = 1
-    })
+  // Puts a run and its details in the pane in one step, laid out and
+  // scrolled before the next frame paints. A live refresh of the run already
+  // shown keeps the reader's scroll position.
+  function show(item, detail, keepScroll) {
+    var sameRun = shown !== null && shown.repo === item.repo && shown.run.id === item.run.id
+    shown = item
+    shownDetail = detail
+    shownLogHtml = detail ? logHtmlFor(detail.log || "") : ""
+    if (keepScroll && sameRun) return
+    detailColumn.forceLayout()
+    var max = Math.max(0, detailColumn.implicitHeight - detailFlick.height)
+    detailFlick.contentY = shownLogHtml === "" ? 0 : max
   }
 
-  function refreshDetail() {
+  function refreshDetail(force) {
     var item = selected
     if (!item || !ci) {
-      runDetail = null
-      runDetailKey = ""
-      logHtml = ""
-      return
-    }
-    if (item.kind === "job") {
-      runDetail = null
-      runDetailKey = ""
-      var path = ci.safeLogPath(item.job)
-      if (path === "") { logHtml = ""; return }
-      if (tailProc.running) tailProc.running = false
-      tailProc.command = [
-        "bash", "-c",
-        "tail -n \"$1\" -- \"$3\" | head -c \"$2\"",
-        "omarci-log-tail", "300", String(ci.maxLogBytes), path
-      ]
-      tailProc.running = true
+      shown = null
+      shownDetail = null
+      shownLogHtml = ""
       return
     }
     var key = runKey(item)
-    if (key === runDetailKey && runDetail) return
     var cached = detailCache[key]
-    if (cached) {
-      runDetailKey = key
-      showDetail(function() {
-        root.runDetail = cached
-        root.rebuildLog(cached.log || "")
-      })
+    if (cached && !force) {
+      show(item, cached, false)
       return
     }
-    if (key !== runDetailKey) {
-      runDetail = null
-      logHtml = ""
-    }
-    runDetailKey = key
-    runDetailLoading = true
+    if (detailProc.running && runKey(pendingItem) === key) return
+    pendingItem = item
+    loading = true
     if (detailProc.running) detailProc.running = false
     detailProc.command = [ci.cliPath, "gh", "view", String(item.repo), String(item.run.id)]
     detailProc.running = true
   }
 
-  // A log's verdict, or its error, is at the end.
-  function scrollDetailToEnd() {
-    if (logHtml === "") { detailFlick.contentY = 0; return }
-    detailFlick.contentY = Math.max(0, detailFlick.contentHeight - detailFlick.height)
-  }
-
-  readonly property bool canRetry: selectedRun !== null && selectedRun.status === "completed"
-  readonly property bool canCancel: selectedRun !== null && ci !== null && ci.runIsActive(selectedRun)
-
-  // Open: the run on github.com, or a local job's log in a terminal.
   function openSelected() {
-    if (!ci || !selected) return
-    if (runSelected) ci.openRun(selected.repo, selectedRun.id)
-    else ci.openLog(selectedJob.id)
+    if (ci && selected) ci.openRun(selected.repo, selectedRun.id)
   }
 
   // Retry: the failed jobs of a failed run, the whole run otherwise.
   function retrySelected() {
     if (!ci || !canRetry) return
-    if (runFailed) ci.rerunFailed(selected.repo, selectedRun.id)
+    if (selectedFailed) ci.rerunFailed(selected.repo, selectedRun.id)
     else ci.rerunAll(selected.repo, selectedRun.id)
   }
 
@@ -345,18 +286,13 @@ Panel {
 
   onItemsChanged: {
     clampIndex()
-    if (opened) detailDebounce.restart()
+    if (opened) refreshDetail(false)
   }
-  onSelectedIndexChanged: {
-    if (detailFlick) detailFlick.contentY = 0
-    if (opened) detailDebounce.restart()
-  }
+  onSelectedIndexChanged: if (opened) refreshDetail(false)
   onOpenedChanged: {
     if (opened) {
-      cursorActive = false
       clampIndex()
-      runDetailKey = ""
-      refreshDetail()
+      refreshDetail(false)
       if (ci) ci.syncGithub()
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
     }
@@ -369,23 +305,12 @@ Panel {
     }
   }
 
+  // Keeps the pane live while the shown run is still running.
   Timer {
-    id: detailDebounce
-    interval: 120
-    onTriggered: root.refreshDetail()
-  }
-
-  // Keeps the detail pane live while the selected item is still running.
-  Timer {
-    interval: root.runSelected ? 8000 : 700
-    running: root.opened && root.selected !== null
-      && (root.selectedRun ? (root.ci !== null && root.ci.runIsActive(root.selectedRun))
-                           : (root.selectedJob !== null && root.selectedJob.status === "running"))
+    interval: 8000
+    running: root.opened && root.shown !== null && root.ci !== null && root.ci.runIsActive(root.shown.run)
     repeat: true
-    onTriggered: {
-      if (root.runSelected) root.runDetailKey = ""
-      root.refreshDetail()
-    }
+    onTriggered: root.refreshDetail(true)
   }
 
   Process {
@@ -395,41 +320,25 @@ Panel {
       waitForEnd: true
     }
     onExited: function(code) {
-      root.runDetailLoading = false
-      if (code !== 0) return
+      root.loading = false
+      var item = root.pendingItem
+      if (code !== 0 || !item) return
+      var detail
       try {
-        var parsed = JSON.parse(String(detailOut.text || ""))
-        var key = root.runDetailKey
-        var finished = Array.isArray(parsed.jobs) && parsed.jobs.length > 0
-          && parsed.jobs.every(function(j) { return j.status === "completed" })
-        if (finished) {
-          var next = Object.assign({}, root.detailCache)
-          next[key] = parsed
-          root.detailCache = next
-        }
-        var first = !root.runDetail
-        var apply = function() {
-          root.runDetail = parsed
-          root.rebuildLog(parsed.log || "")
-        }
-        // A live refresh of the same run keeps the reader's scroll position.
-        if (first) root.showDetail(apply)
-        else apply()
+        detail = JSON.parse(String(detailOut.text || ""))
       } catch (e) {
         console.warn("omarci: bad run detail", e)
+        return
       }
-    }
-  }
-
-  Process {
-    id: tailProc
-    stdout: StdioCollector {
-      id: tailOut
-      waitForEnd: true
-      onStreamFinished: {
-        var text = String(tailOut.text || "")
-        root.showDetail(function() { root.rebuildLog(text) })
+      var key = root.runKey(item)
+      if (root.isFinished(detail)) {
+        var next = Object.assign({}, root.detailCache)
+        next[key] = detail
+        root.detailCache = next
       }
+      // A reply for a run no longer selected only fills the cache.
+      if (root.runKey(root.selected) !== key) return
+      root.show(item, detail, true)
     }
   }
 
@@ -442,7 +351,7 @@ Panel {
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(940))
     contentHeight: root.settingsOpen
-      ? panel.fittedContentHeight(Style.space(320), Style.space(460))
+      ? panel.fittedContentHeight(Style.space(300), Style.space(440))
       : panel.cappedContentHeight(Style.space(640))
 
     PanelKeyCatcher {
@@ -450,9 +359,7 @@ Panel {
       anchors.fill: parent
       blocked: repoField.activeFocus
       onMoveRequested: function(dx, dy) {
-        if (root.settingsOpen || dy === 0) return
-        if (!root.cursorActive) { root.cursorActive = true; return }
-        root.moveCursor(dy)
+        if (!root.settingsOpen && dy !== 0) root.moveCursor(dy)
       }
       onActivateRequested: if (!root.settingsOpen) root.openSelected()
       onCloseRequested: {
@@ -471,7 +378,7 @@ Panel {
         anchors.fill: parent
         spacing: Style.space(10)
 
-        // ---- Header: title left, every action right -----------------------
+        // ---- Header: title left, actions right ------------------------------
 
         RowLayout {
           Layout.fillWidth: true
@@ -500,14 +407,14 @@ Panel {
             Button {
               visible: !root.settingsOpen && root.selected !== null
               text: "Open"
-              tooltipText: root.runSelected ? "Open the run on github.com (Enter)" : "Open the log in a terminal (Enter)"
+              tooltipText: "Open the run on github.com (Enter)"
               bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
               onClicked: root.openSelected()
             }
             Button {
               visible: !root.settingsOpen && root.canRetry
               text: "Retry"
-              tooltipText: root.runFailed ? "Re-run the failed jobs (r)" : "Re-run the whole run (r)"
+              tooltipText: root.selectedFailed ? "Re-run the failed jobs (r)" : "Re-run the whole run (r)"
               bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
               onClicked: root.retrySelected()
             }
@@ -530,7 +437,7 @@ Panel {
 
         PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
 
-        // ---- Settings ----------------------------------------------------
+        // ---- Settings ----------------------------------------------------------
 
         Column {
           visible: root.settingsOpen
@@ -540,7 +447,7 @@ Panel {
           Toggle {
             width: parent.width
             label: "Notifications"
-            description: "Desktop toast when a local job, or a GitHub run you started, finishes"
+            description: "Desktop toast when a run you started finishes"
             checked: root.ci ? root.ci.notify : true
             foreground: root.foreground
             fontFamily: root.fontFamily
@@ -612,7 +519,7 @@ Panel {
           }
         }
 
-        // ---- Body: list left, detail right ------------------------------
+        // ---- Body: runs left, the shown run right -----------------------------
 
         RowLayout {
           visible: !root.settingsOpen
@@ -620,7 +527,6 @@ Panel {
           Layout.fillHeight: true
           spacing: Style.space(10)
 
-          // Left: one card per watched repo, then local jobs.
           Flickable {
             id: listFlick
             Layout.preferredWidth: Style.space(360)
@@ -645,7 +551,7 @@ Panel {
               spacing: Style.space(10)
 
               Column {
-                visible: root.items.length === 0 && (!root.ci || root.ci.repos.length === 0)
+                visible: root.ci !== null && root.ci.repos.length === 0
                 width: parent.width
                 spacing: Style.space(8)
 
@@ -669,7 +575,7 @@ Panel {
               }
 
               Repeater {
-                model: root.ghRepos
+                model: root.repoCards
                 delegate: Rectangle {
                   id: card
                   required property var modelData
@@ -721,14 +627,13 @@ Panel {
                         required property var modelData
                         required property int index
                         readonly property int flatIndex: card.modelData.offset + index
-                        readonly property bool isSelected: root.selectedIndex === flatIndex
                         width: cardColumn.width
                         implicitHeight: runText.implicitHeight + Style.space(8)
 
                         Rectangle {
                           anchors.fill: parent
                           radius: Style.cornerRadius
-                          color: runRow.isSelected ? Color.menu.selectedBackground : "transparent"
+                          color: root.selectedIndex === runRow.flatIndex ? Color.menu.selectedBackground : "transparent"
                         }
 
                         Row {
@@ -794,105 +699,9 @@ Panel {
                   }
                 }
               }
-
-              Rectangle {
-                visible: root.jobs.length > 0
-                width: listColumn.width
-                implicitHeight: jobsColumn.implicitHeight + Style.space(12)
-                radius: Style.cornerRadius
-                color: root.cardFill
-                border.width: 1
-                border.color: root.cardBorder
-
-                Column {
-                  id: jobsColumn
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.top: parent.top
-                  anchors.margins: Style.space(6)
-                  spacing: Style.space(1)
-
-                  Text {
-                    leftPadding: Style.space(4)
-                    text: "Local jobs"
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: true
-                  }
-
-                  Repeater {
-                    model: root.jobs
-                    delegate: Item {
-                      id: jobRow
-                      required property var modelData
-                      required property int index
-                      readonly property int flatIndex: root.runCount + index
-                      readonly property bool isSelected: root.selectedIndex === flatIndex
-                      width: jobsColumn.width
-                      implicitHeight: jobText.implicitHeight + Style.space(8)
-
-                      Rectangle {
-                        anchors.fill: parent
-                        radius: Style.cornerRadius
-                        color: jobRow.isSelected ? Color.menu.selectedBackground : "transparent"
-                      }
-
-                      Row {
-                        anchors.fill: parent
-                        anchors.leftMargin: Style.space(4)
-                        anchors.rightMargin: Style.space(4)
-                        spacing: Style.space(6)
-
-                        Text {
-                          width: Style.space(14)
-                          anchors.verticalCenter: parent.verticalCenter
-                          text: root.jobGlyph(jobRow.modelData)
-                          color: root.jobColor(jobRow.modelData)
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.bodySmall
-                          horizontalAlignment: Text.AlignHCenter
-                        }
-
-                        Column {
-                          id: jobText
-                          width: parent.width - Style.space(14) - Style.space(64) - Style.space(12)
-                          anchors.verticalCenter: parent.verticalCenter
-
-                          Text {
-                            width: parent.width
-                            text: jobRow.modelData.name || "job"
-                            color: root.foreground
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.caption
-                            elide: Text.ElideRight
-                          }
-                        }
-
-                        Text {
-                          width: Style.space(64)
-                          anchors.verticalCenter: parent.verticalCenter
-                          text: root.ci ? root.ci.formatElapsed(jobRow.modelData) : ""
-                          color: root.dim
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                          horizontalAlignment: Text.AlignRight
-                        }
-                      }
-
-                      MouseArea {
-                        anchors.fill: parent
-                        onClicked: root.select(jobRow.flatIndex)
-                        onDoubleClicked: root.openSelected()
-                      }
-                    }
-                  }
-                }
-              }
             }
           }
 
-          // Right: what the selected run or job did.
           Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -902,17 +711,30 @@ Panel {
             border.color: root.cardBorder
 
             Text {
-              visible: root.selected === null
+              visible: root.shown === null
               anchors.centerIn: parent
-              text: "Select a run or job"
+              text: root.loading ? "Loading…" : "Select a run"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
             }
 
+            // A quiet marker while a newer selection's details are on their way.
+            Text {
+              visible: root.loading && root.shown !== null
+              anchors.top: parent.top
+              anchors.right: parent.right
+              anchors.margins: Style.space(8)
+              z: 1
+              text: root.ci ? root.ci.spinnerGlyph + " loading" : "loading"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
             Flickable {
               id: detailFlick
-              visible: root.selected !== null
+              visible: root.shown !== null
               anchors.fill: parent
               anchors.margins: Style.space(10)
               clip: true
@@ -934,19 +756,17 @@ Panel {
                 width: detailFlick.width
                 spacing: Style.space(6)
 
-                // Run header
                 Column {
-                  visible: root.runSelected
                   width: parent.width
                   spacing: Style.space(2)
 
                   Text {
                     width: parent.width
-                    text: root.selectedRun
-                      ? root.glyphFor(root.selectedRun.status, root.selectedRun.conclusion) + "  "
-                        + (root.selectedRun.workflow || "") + " · " + (root.selectedRun.branch || "")
+                    text: root.shown
+                      ? root.glyphFor(root.shown.run.status, root.shown.run.conclusion) + "  "
+                        + (root.shown.run.workflow || "") + " · " + (root.shown.run.branch || "")
                       : ""
-                    color: root.selectedRun ? root.runColor(root.selectedRun) : root.foreground
+                    color: root.shown ? root.runColor(root.shown.run) : root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     font.bold: true
@@ -955,7 +775,7 @@ Panel {
 
                   Text {
                     width: parent.width
-                    text: root.selectedRun ? (root.selectedRun.title || "") : ""
+                    text: root.shown ? (root.shown.run.title || "") : ""
                     color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -966,39 +786,10 @@ Panel {
 
                   Text {
                     width: parent.width
-                    text: root.selectedRun && root.ci
-                      ? root.selected.repo + " · " + (root.selectedRun.sha || "") + " · "
-                        + (root.selectedRun.actor || "") + " · " + root.ci.runLabel(root.selectedRun)
-                        + " · " + root.ci.runTiming(root.selectedRun)
-                      : ""
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
-                  }
-                }
-
-                // Job header
-                Column {
-                  visible: root.jobSelected
-                  width: parent.width
-                  spacing: Style.space(2)
-
-                  Text {
-                    width: parent.width
-                    text: root.selectedJob ? root.jobGlyph(root.selectedJob) + "  " + (root.selectedJob.name || "job") : ""
-                    color: root.selectedJob ? root.jobColor(root.selectedJob) : root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    font.bold: true
-                    elide: Text.ElideRight
-                  }
-
-                  Text {
-                    width: parent.width
-                    text: root.selectedJob && root.ci
-                      ? "local job · " + root.ci.formatDateTime(root.selectedJob) + " · " + root.ci.formatElapsed(root.selectedJob)
-                        + (root.selectedJob.message ? " · " + root.selectedJob.message : "")
+                    text: root.shown && root.ci
+                      ? root.shown.repo + " · " + (root.shown.run.sha || "") + " · "
+                        + (root.shown.run.actor || "") + " · " + root.ci.runLabel(root.shown.run)
+                        + " · " + root.ci.runTiming(root.shown.run)
                       : ""
                     color: root.dim
                     font.family: root.fontFamily
@@ -1009,17 +800,8 @@ Panel {
 
                 PanelSeparator { width: parent.width; foreground: root.foreground }
 
-                // The run's jobs and their steps.
-                Text {
-                  visible: root.runSelected && root.runDetailLoading && !root.runDetail
-                  text: "Loading jobs and log…"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
                 Repeater {
-                  model: root.runSelected && root.runDetail ? root.runDetail.jobs : []
+                  model: root.shownDetail ? root.shownDetail.jobs : []
                   delegate: Column {
                     id: ghJob
                     required property var modelData
@@ -1056,15 +838,8 @@ Panel {
                   }
                 }
 
-                PanelSectionHeader {
-                  visible: root.logHtml !== ""
-                  text: root.runSelected && root.runDetail && root.runDetail.logKind === "failed" ? "FAILED JOBS' LOG" : "LOG"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                }
-
                 Text {
-                  visible: root.selectedRun !== null && root.ci !== null && root.ci.runIsActive(root.selectedRun)
+                  visible: root.shown !== null && root.ci !== null && root.ci.runIsActive(root.shown.run)
                   width: parent.width
                   text: "The log appears here when the run finishes; Open shows it live on github.com."
                   color: root.dim
@@ -1073,18 +848,17 @@ Panel {
                   wrapMode: Text.WordWrap
                 }
 
-                Text {
-                  visible: root.jobSelected && root.logHtml === ""
-                  text: "No log yet."
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                PanelSectionHeader {
+                  visible: root.shownLogHtml !== ""
+                  text: root.shownDetail && root.shownDetail.logKind === "failed" ? "FAILED JOBS' LOG" : "LOG"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
                 }
 
                 Text {
-                  visible: root.logHtml !== ""
+                  visible: root.shownLogHtml !== ""
                   width: detailColumn.width
-                  text: root.logHtml
+                  text: root.shownLogHtml
                   textFormat: Text.StyledText
                   color: root.foreground
                   font.family: root.fontFamily

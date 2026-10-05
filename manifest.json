@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.matiacone.omarci",
   "name": "Omarci",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "author": "Mathew",
   "license": "MIT",
-  "description": "Local CI jobs and GitHub Actions runs in the Omarchy bar: watch repos, re-run and cancel runs, pass/fail notifications",
+  "description": "GitHub Actions in the Omarchy bar: watch repos, see each run's jobs, steps and log, Open / Retry / Cancel, and a notification when your run finishes",
   "kinds": [
     "service",
     "bar-widget"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Omarci",
-    "description": "Shows your watched repos' GitHub Actions runs and local CI jobs. Click for the run list and actions.",
+    "description": "Shows your watched repos' GitHub Actions runs. Click for the runs, their logs, and Open / Retry / Cancel.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -30,7 +30,7 @@
         "type": "boolean",
         "label": "Notifications",
         "defaultValue": true,
-        "description": "Desktop toast when a local job, or a GitHub run you started, finishes"
+        "description": "Desktop toast when a run you started finishes"
       }
     ]
   }
