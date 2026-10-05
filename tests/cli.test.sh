@@ -85,6 +85,11 @@ case "$1 $2" in
   "api repos/acme/app") body='{"full_name":"Acme/App"}' ;;
   "api repos/Acme/App/actions/runs?per_page=10") body=$(cat "$FAKE_GH/runs.json") ;;
   "run rerun"|"run cancel") exit 0 ;;
+  "run view")
+    if [[ " $* " == *" --json "* ]]; then body=$(cat "$FAKE_GH/jobs.json")
+    elif [[ " $* " == *" --log-failed "* ]]; then printf 'ci\tTest\t2026-10-05T10:00:59Z boom\n'; exit 0
+    else printf 'ci\tTest\t2026-10-05T10:00:59Z all good\n'; exit 0
+    fi ;;
   *) echo "fake gh: unexpected $*" >&2; exit 2 ;;
 esac
 if [[ -n $jq_filter ]]; then jq -r "$jq_filter" <<<"$body"; else printf '%s\n' "$body"; fi
@@ -141,6 +146,19 @@ grep -q '^run rerun 42 -R Acme/App --failed$' "$FAKE_GH/calls" || fail "gh rerun
 grep -q '^run cancel 42 -R Acme/App$' "$FAKE_GH/calls" || fail "gh cancel did not reach gh"
 "$CLI" gh rerun Acme/App 'x; rm -rf /' >/dev/null 2>&1 && fail "a non-numeric run id must be refused" || true
 "$CLI" gh rerun '../etc' 42 >/dev/null 2>&1 && fail "a malformed repo must be refused" || true
+
+jobs_json() { # $1 conclusion of the one job
+  jq -n --arg c "$1" '{jobs: [{name: "ci", status: "completed", conclusion: $c,
+    startedAt: "2026-10-05T10:00:05Z", completedAt: "2026-10-05T10:01:00Z", url: "u",
+    steps: [{number: 1, name: "Test", status: "completed", conclusion: $c}]}]}' >"$FAKE_GH/jobs.json"
+}
+jobs_json failure
+"$CLI" gh view Acme/App 42 | jq -e '.logKind == "failed" and (.log | contains("boom"))
+  and .jobs[0].steps[0].name == "Test" and .jobs[0].completedAt > .jobs[0].startedAt' >/dev/null \
+  || fail "gh view of a failed run should carry the failed jobs' log"
+jobs_json success
+"$CLI" gh view Acme/App 42 | jq -e '.logKind == "all" and (.log | contains("all good"))' >/dev/null \
+  || fail "gh view of a passed run should carry the run's log"
 
 "$CLI" repos remove acme/APP
 [[ -z $("$CLI" repos list) ]] || fail "repos remove should match case-insensitively"

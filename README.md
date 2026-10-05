@@ -31,26 +31,29 @@ omarci repos remove owner/repo
 omarci repos              # list
 ```
 
-The panel's **GitHub** view shows one card per repo with its latest 10 runs: status, workflow, branch, commit title, who started it, how long it took and how long ago. The widget refreshes every 15 s while a run is in progress and every minute otherwise.
+The panel is one view. Down the left, a card per watched repo with its latest 10 runs (status, workflow, branch, commit title, how long ago), then your local jobs. On the right, the selected run's jobs and steps and the tail of its log (the failed jobs' log when something failed), or the selected local job's log. The actions for the selection sit top right. The widget refreshes every 15 s while a run is in progress and every minute otherwise.
 
 | Key | Action |
 | --- | --- |
-| `j` / `k` | Select a run |
-| `Enter` | Open the run on github.com |
+| `j` / `k` | Select a run or job |
+| `Enter` | Open the run on github.com, or the job's log |
 | `R` | Re-run failed jobs |
 | `c` | Cancel a running run |
-| `f` | Failed jobs' log in a terminal |
+| `l` | Full log in a terminal |
+| `x` | Dismiss a local job |
+| `d` | Dismiss all finished local jobs |
 | `r` | Refresh now |
-| `g` | Switch between GitHub and Local |
+| `s` | Settings (watched repos, notifications) |
 
-The buttons under the list do the same, plus **Re-run all**. The same actions work from a terminal:
+The buttons top right do the same, plus **Re-run all**. The same actions work from a terminal:
 
 ```bash
 omarci gh sync                              # refresh now
 omarci gh open owner/repo RUN_ID
 omarci gh rerun owner/repo RUN_ID [--failed]
 omarci gh cancel owner/repo RUN_ID
-omarci gh log owner/repo RUN_ID             # failed jobs' log
+omarci gh log owner/repo RUN_ID [--all]     # failed jobs' log, or all of it
+omarci gh view owner/repo RUN_ID            # jobs, steps and log tail as JSON
 ```
 
 ## Local jobs
@@ -69,16 +72,7 @@ omarci pass "$id" -m "ok"
 # or: omarci fail "$id" -m "tsc exited 1"
 ```
 
-| Key | Action |
-| --- | --- |
-| `j` / `k` | Select a job |
-| `Enter` | Open the full log in a terminal |
-| `x` | Dismiss the selected job |
-| `d` | Dismiss all finished jobs |
-| `s` | Settings |
-| `Esc` | Close settings, or close the panel |
-
-**Settings** is bottom-right. Turn notifications off there to stop `notify-send` from the CLI as well.
+Local jobs show in the same list, under the repos. Turn notifications off in **Settings** (top right) to stop `notify-send` from the CLI as well.
 
 ```bash
 omarci list

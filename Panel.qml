@@ -8,6 +8,8 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
+// One panel: every watched repo's runs and the local jobs down the left, the
+// selected item's jobs, steps and log on the right, its actions top right.
 Panel {
   id: root
   moduleName: "io.github.matiacone.omarci"
@@ -35,22 +37,17 @@ Panel {
     return dim
   }
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property var jobs: ci ? ci.visibleJobs() : []
-
-  // "github": the watched repos' Actions runs. "local": omarci's own jobs.
-  property string view: "github"
-  readonly property bool githubView: !settingsOpen && view === "github"
-  readonly property bool localView: !settingsOpen && view === "local"
+  readonly property color cardFill: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.04)
+  readonly property color cardBorder: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.10)
 
   property int selectedIndex: 0
-  property int ghIndex: 0
   property bool cursorActive: false
   property bool settingsOpen: false
-  property string logText: ""
-  property string followId: ""
-  property var logLines: []
 
-  // The watched repos in the order they were added, each with its runs.
+  // ---- The list: runs per watched repo, then local jobs ----------------
+
+  readonly property var jobs: ci ? ci.visibleJobs() : []
+
   readonly property var ghRepos: {
     if (!ci) return []
     var byName = {}
@@ -60,96 +57,77 @@ Panel {
     var offset = 0
     for (var j = 0; j < ci.repos.length; j++) {
       var name = ci.repos[j]
-      var entry = byName[String(name).toLowerCase()] || { repo: name, error: null, runs: [] }
-      var runs = entry.runs || []
-      out.push({ repo: name, error: entry.error, runs: runs, offset: offset, loaded: !!byName[String(name).toLowerCase()] })
+      var entry = byName[String(name).toLowerCase()]
+      var runs = entry && entry.runs ? entry.runs : []
+      out.push({ repo: name, error: entry ? entry.error : null, runs: runs, offset: offset, loaded: !!entry })
       offset += runs.length
     }
     return out
   }
 
-  // Every run across the repos, so j/k walks them in display order.
-  readonly property var ghRows: {
-    var rows = []
+  readonly property int runCount: {
+    var n = 0
+    for (var i = 0; i < ghRepos.length; i++) n += ghRepos[i].runs.length
+    return n
+  }
+
+  readonly property var items: {
+    var out = []
     for (var i = 0; i < ghRepos.length; i++) {
       var runs = ghRepos[i].runs
-      for (var j = 0; j < runs.length; j++) rows.push({ repo: ghRepos[i].repo, run: runs[j] })
+      for (var j = 0; j < runs.length; j++) out.push({ kind: "run", repo: ghRepos[i].repo, run: runs[j] })
     }
-    return rows
+    for (var k = 0; k < jobs.length; k++) out.push({ kind: "job", job: jobs[k] })
+    return out
   }
 
-  readonly property var selectedRow: {
-    if (ghRows.length === 0) return null
-    return ghRows[Math.max(0, Math.min(ghIndex, ghRows.length - 1))]
-  }
-  readonly property var selectedRun: selectedRow ? selectedRow.run : null
-  readonly property string selectedRunState: ci && selectedRun ? ci.runState(selectedRun) : ""
-
-  readonly property var selectedJob: {
-    if (jobs.length === 0) return null
-    var i = Math.max(0, Math.min(selectedIndex, jobs.length - 1))
-    return jobs[i]
-  }
+  readonly property var selected: items.length === 0 ? null
+    : items[Math.max(0, Math.min(selectedIndex, items.length - 1))]
+  readonly property bool runSelected: selected !== null && selected.kind === "run"
+  readonly property bool jobSelected: selected !== null && selected.kind === "job"
+  readonly property var selectedRun: runSelected ? selected.run : null
+  readonly property var selectedJob: jobSelected ? selected.job : null
+  readonly property string runState: ci && selectedRun ? ci.runState(selectedRun) : ""
+  readonly property bool runFailed: runState === "failure" || runState === "timed_out" || runState === "startup_failure"
 
   readonly property string heroMeta: {
     if (root.settingsOpen) return "settings"
     if (!ci) return ""
-    if (root.view === "github") {
-      if (ci.repos.length === 0) return "no repos watched"
-      if (ci.ghActiveCount > 0) return ci.ghActiveCount + " running"
-      return ci.repos.length + (ci.repos.length === 1 ? " repo" : " repos")
-    }
-    if (!ci.latestJob) return "no jobs yet"
-    if (ci.localState === "running") return "running"
-    if (ci.localState === "fail") return "failed"
-    if (ci.localState === "pass") return "passed"
-    return ""
+    var parts = []
+    if (ci.ghActiveCount > 0) parts.push(ci.ghActiveCount + " running")
+    if (ci.repos.length > 0) parts.push(ci.repos.length + (ci.repos.length === 1 ? " repo" : " repos"))
+    if (jobs.length > 0) parts.push(jobs.length + (jobs.length === 1 ? " local job" : " local jobs"))
+    return parts.length ? parts.join(" · ") : "nothing watched yet"
   }
 
-  readonly property string selectedWhen: ci && selectedJob ? ci.formatDateTime(selectedJob) : ""
+  // ---- Detail pane state --------------------------------------------------
+
+  // Jobs and failed log of the selected run, from `omarci gh view`.
+  property var runDetail: null
+  property string runDetailKey: ""
+  property bool runDetailLoading: false
+  property var logLines: []
+
+  function runKey(item) {
+    if (!item || item.kind !== "run") return ""
+    return item.repo + "#" + item.run.id + "#" + item.run.updatedAt + "#" + item.run.status
+  }
 
   function clampIndex() {
-    if (jobs.length === 0) selectedIndex = 0
-    else selectedIndex = Math.max(0, Math.min(selectedIndex, jobs.length - 1))
-    if (ghRows.length === 0) ghIndex = 0
-    else ghIndex = Math.max(0, Math.min(ghIndex, ghRows.length - 1))
+    if (items.length === 0) selectedIndex = 0
+    else selectedIndex = Math.max(0, Math.min(selectedIndex, items.length - 1))
   }
 
   function moveCursor(dy) {
     cursorActive = true
-    if (root.view === "github") {
-      if (ghRows.length === 0) return
-      ghIndex = Math.max(0, Math.min(ghRows.length - 1, ghIndex + dy))
-      return
-    }
-    if (jobs.length === 0) return
-    selectedIndex = Math.max(0, Math.min(jobs.length - 1, selectedIndex + dy))
+    if (items.length === 0) return
+    selectedIndex = Math.max(0, Math.min(items.length - 1, selectedIndex + dy))
   }
 
-  function selectIndex(index) {
+  function select(index) {
     cursorActive = true
     selectedIndex = index
     clampIndex()
-  }
-
-  function selectRun(index) {
-    cursorActive = true
-    ghIndex = index
-    clampIndex()
-  }
-
-  function setView(value) {
-    view = value
-    cursorActive = false
-    clampIndex()
-    if (value === "local") followSelected()
-  }
-
-  function statusColor(job) {
-    if (!job) return dim
-    if (job.status === "fail") return urgent
-    if (job.status === "pass") return success
-    return foreground
   }
 
   function runColor(run) {
@@ -160,117 +138,148 @@ Panel {
     return dim
   }
 
-  function runGlyph(run) {
-    var st = ci ? ci.runState(run) : ""
-    if (st === "running") return ci.spinnerGlyph
-    if (st === "queued") return "○"
-    if (st === "success") return "✓"
-    if (st === "failure" || st === "timed_out" || st === "startup_failure") return "✗"
-    if (st === "cancelled") return "⊘"
+  function glyphFor(status, conclusion) {
+    if (status === "in_progress") return ci ? ci.spinnerGlyph : "…"
+    if (status && status !== "completed") return "○"
+    if (conclusion === "success") return "✓"
+    if (conclusion === "failure" || conclusion === "timed_out" || conclusion === "startup_failure") return "✗"
+    if (conclusion === "cancelled") return "⊘"
+    if (conclusion === "skipped") return "–"
     return "·"
   }
 
-  function rowMessage(job) {
-    if (!job) return ""
-    var msg = String(job.message || "")
-    if (/^exit \d+$/.test(msg)) return ""
-    return msg
+  function colorFor(status, conclusion) {
+    if (status && status !== "completed") return foreground
+    if (conclusion === "success") return success
+    if (conclusion === "failure" || conclusion === "timed_out" || conclusion === "startup_failure") return urgent
+    return dim
+  }
+
+  function jobGlyph(job) {
+    if (!job) return "·"
+    if (job.status === "running") return ci ? ci.spinnerGlyph : "…"
+    if (job.status === "fail") return "✗"
+    if (job.status === "pass") return "✓"
+    return "·"
+  }
+
+  function jobColor(job) {
+    if (!job) return dim
+    if (job.status === "fail") return urgent
+    if (job.status === "pass") return success
+    return foreground
+  }
+
+  function ago(sec) {
+    if (!ci || !sec) return ""
+    return ci.shortDuration(ci.nowSec - sec) + " ago"
   }
 
   function stripAnsi(s) {
     return String(s || "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
   }
 
-  function tidyLogLine(line) {
+  // GitHub's log lines are `job<TAB>step<TAB>timestamp text`; keep the text.
+  function tidyLine(line) {
     var s = String(line || "")
+    var tab = s.lastIndexOf("\t")
+    if (tab >= 0) s = s.substring(tab + 1)
+    s = s.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "")
     var prefixed = s.match(/^(@?[\w./-]+(?::[\w@./-]+)+):\s(.*)$/)
     if (prefixed) s = prefixed[2]
-    s = s.replace(/: (error TS\d+:)/, "\n  $1")
-    return s
+    return s.replace(/^##\[(group|endgroup|command)\]/, "").replace(/^##\[error\]/, "error: ")
   }
 
   function lineKind(line) {
     var s = String(line || "")
-    if (/^[─–—-]{2,}/.test(s) || /^──/.test(s)) return "section"
-    if (/^\s*[✗×xX] /.test(s) || /\berror TS\d+|\bERROR\b|failed|not signing off/.test(s))
-      return "error"
+    if (/^[─–—-]{2,}/.test(s)) return "section"
+    if (/^\s*[✗×] |^error: |\berror TS\d+|\bERROR\b|\bFAIL\b|failed|Failed/.test(s)) return "error"
     if (/^\s*[✓✔] /.test(s)) return "ok"
     return "plain"
   }
 
   function rebuildLog(text) {
+    if (String(text || "").trim() === "") { logLines = []; return }
     var raw = stripAnsi(text).replace(/\r/g, "").split("\n")
     var lines = []
     var blanks = 0
-    var maxLines = 200
-    var maxLine = 2048
-    for (var i = 0; i < raw.length && lines.length < maxLines; i++) {
-      var line = tidyLogLine(String(raw[i]).replace(/[ \t]+$/g, ""))
-      if (line.length > maxLine) line = line.substring(0, maxLine)
+    for (var i = 0; i < raw.length && lines.length < 300; i++) {
+      var line = tidyLine(raw[i]).replace(/[ \t]+$/g, "")
+      if (line.length > 2048) line = line.substring(0, 2048)
       if (line === "") {
-        blanks++
-        if (blanks > 1) continue
+        if (++blanks > 1) continue
         lines.push({ text: " ", kind: "plain" })
         continue
       }
       blanks = 0
-      var parts = line.split("\n")
-      for (var p = 0; p < parts.length && lines.length < maxLines; p++) {
-        var part = parts[p]
-        if (part.length > maxLine) part = part.substring(0, maxLine)
-        lines.push({ text: part, kind: lineKind(part) })
-      }
+      lines.push({ text: line, kind: lineKind(line) })
     }
     logLines = lines
   }
 
-  function followSelected() {
-    var job = selectedJob
-    var id = job ? String(job.id || "") : ""
-    followId = id
-    var path = ci ? ci.safeLogPath(job) : ""
-    if (!id || !ci || path === "") {
-      logText = ""
+  function refreshDetail() {
+    var item = selected
+    if (!item || !ci) {
+      runDetail = null
+      runDetailKey = ""
       logLines = []
       return
     }
-    // Byte cap is on the process: tail -n only picks the window, head -c
-    // stops stdout before StdioCollector can grow without bound.
-    if (tailProc.running) tailProc.running = false
-    tailProc.command = [
-      "bash", "-c",
-      "tail -n \"$1\" -- \"$3\" | head -c \"$2\"",
-      "omarci-log-tail",
-      "200",
-      String(ci.maxLogBytes),
-      path
-    ]
-    tailProc.running = true
+    if (item.kind === "job") {
+      runDetail = null
+      runDetailKey = ""
+      var path = ci.safeLogPath(item.job)
+      if (path === "") { logLines = []; return }
+      if (tailProc.running) tailProc.running = false
+      tailProc.command = [
+        "bash", "-c",
+        "tail -n \"$1\" -- \"$3\" | head -c \"$2\"",
+        "omarci-log-tail", "300", String(ci.maxLogBytes), path
+      ]
+      tailProc.running = true
+      return
+    }
+    var key = runKey(item)
+    if (key === runDetailKey && runDetail) return
+    if (key !== runDetailKey) {
+      runDetail = null
+      logLines = []
+    }
+    runDetailKey = key
+    runDetailLoading = true
+    if (detailProc.running) detailProc.running = false
+    detailProc.command = [ci.cliPath, "gh", "view", String(item.repo), String(item.run.id)]
+    detailProc.running = true
+  }
+
+  // A log's verdict, or its error, is at the end.
+  function scrollDetailToEnd() {
+    if (logLines.length === 0) { detailFlick.contentY = 0; return }
+    detailFlick.contentY = Math.max(0, detailFlick.contentHeight - detailFlick.height)
   }
 
   function activateSelected() {
-    if (!ci) return
-    if (root.view === "github") {
-      if (selectedRow) ci.openRun(selectedRow.repo, selectedRun.id)
-      return
-    }
-    if (selectedJob) ci.openLog(selectedJob.id)
+    if (!ci || !selected) return
+    if (runSelected) ci.openRun(selected.repo, selectedRun.id)
+    else ci.openLog(selectedJob.id)
   }
 
-  function dismissSelected() {
-    if (!selectedJob || !ci || root.view !== "local") return
-    ci.dismiss(selectedJob.id)
+  function openLogInTerminal() {
+    if (!ci || !selected) return
+    if (runSelected) ci.openRunLog(selected.repo, selectedRun.id, !runFailed)
+    else ci.openLog(selectedJob.id)
   }
 
   function refresh() {
     if (!ci) return
     ci.reload()
     ci.syncGithub()
+    runDetailKey = ""
+    refreshDetail()
   }
 
   function addRepoFromField() {
-    if (!ci) return
-    ci.addRepo(repoField.text)
+    if (ci) ci.addRepo(repoField.text)
   }
 
   function persistNotify(value) {
@@ -290,41 +299,70 @@ Panel {
       Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
   }
 
-  onJobsChanged: {
+  onItemsChanged: {
     clampIndex()
-    if (opened && root.view === "local") followSelected()
+    if (opened) detailDebounce.restart()
   }
-  onGhRowsChanged: clampIndex()
-  onSelectedIndexChanged: if (opened && root.view === "local") followSelected()
+  onSelectedIndexChanged: {
+    if (detailFlick) detailFlick.contentY = 0
+    if (opened) detailDebounce.restart()
+  }
   onOpenedChanged: {
     if (opened) {
-      if (ci && ci.repos.length === 0 && jobs.length > 0) view = "local"
       cursorActive = false
       clampIndex()
-      if (root.view === "local") followSelected()
+      runDetailKey = ""
+      refreshDetail()
       if (ci) ci.syncGithub()
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
     }
   }
-  onFollowIdChanged: {
-    if (logFlick) logFlick.contentY = 0
-  }
 
   Connections {
     target: root.ci
-    function onRepoErrorChanged() {
-      if (root.ci && root.ci.repoError === "" && !root.ci.addingRepo) repoField.text = ""
-    }
     function onAddingRepoChanged() {
       if (root.ci && !root.ci.addingRepo && root.ci.repoError === "") repoField.text = ""
     }
   }
 
   Timer {
-    interval: 700
-    running: root.opened && root.view === "local" && selectedJob && selectedJob.status === "running"
+    id: detailDebounce
+    interval: 120
+    onTriggered: root.refreshDetail()
+  }
+
+  // Keeps the detail pane live while the selected item is still running.
+  Timer {
+    interval: root.runSelected ? 8000 : 700
+    running: root.opened && root.selected !== null
+      && (root.selectedRun ? (root.ci !== null && root.ci.runIsActive(root.selectedRun))
+                           : (root.selectedJob !== null && root.selectedJob.status === "running"))
     repeat: true
-    onTriggered: root.followSelected()
+    onTriggered: {
+      if (root.runSelected) root.runDetailKey = ""
+      root.refreshDetail()
+    }
+  }
+
+  Process {
+    id: detailProc
+    stdout: StdioCollector {
+      id: detailOut
+      waitForEnd: true
+    }
+    onExited: function(code) {
+      root.runDetailLoading = false
+      if (code !== 0) return
+      try {
+        var parsed = JSON.parse(String(detailOut.text || ""))
+        var fresh = !root.runDetail
+        root.runDetail = parsed
+        root.rebuildLog(parsed.log || "")
+        if (fresh) Qt.callLater(root.scrollDetailToEnd)
+      } catch (e) {
+        console.warn("omarci: bad run detail", e)
+      }
+    }
   }
 
   Process {
@@ -333,14 +371,8 @@ Panel {
       id: tailOut
       waitForEnd: true
       onStreamFinished: {
-        root.logText = String(tailOut.text || "")
-        root.rebuildLog(root.logText)
-      }
-    }
-    onExited: function(code) {
-      if (code !== 0 && String(tailOut.text || "").trim() === "") {
-        root.logText = ""
-        root.logLines = []
+        root.rebuildLog(String(tailOut.text || ""))
+        Qt.callLater(root.scrollDetailToEnd)
       }
     }
   }
@@ -352,28 +384,22 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(520))
-    contentHeight: {
-      if (root.settingsOpen)
-        return panel.fittedContentHeight(Style.space(320), Style.space(460))
-      if (root.localView && root.jobs.length === 0)
-        return panel.fittedContentHeight(Style.space(188), Style.space(220))
-      return panel.cappedContentHeight(Style.space(600))
-    }
+    contentWidth: panel.fittedContentWidth(Style.space(940))
+    contentHeight: root.settingsOpen
+      ? panel.fittedContentHeight(Style.space(320), Style.space(460))
+      : panel.cappedContentHeight(Style.space(640))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       blocked: repoField.activeFocus
       onMoveRequested: function(dx, dy) {
-        if (root.settingsOpen) return
-        if (dy !== 0) {
-          if (!root.cursorActive) { root.cursorActive = true; return }
-          root.moveCursor(dy)
-        }
+        if (root.settingsOpen || dy === 0) return
+        if (!root.cursorActive) { root.cursorActive = true; return }
+        root.moveCursor(dy)
       }
       onActivateRequested: if (!root.settingsOpen) root.activateSelected()
-      onDeleteRequested: if (!root.settingsOpen) root.dismissSelected()
+      onDeleteRequested: if (!root.settingsOpen && root.jobSelected && root.ci) root.ci.dismiss(root.selectedJob.id)
       onCloseRequested: {
         if (root.settingsOpen) root.setSettingsOpen(false)
         else root.close()
@@ -381,79 +407,112 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         if (t === "s" || t === "S") { root.setSettingsOpen(!root.settingsOpen); return }
-        if (root.settingsOpen) return
-        if (t === "g" || t === "G") { root.setView(root.view === "github" ? "local" : "github"); return }
+        if (root.settingsOpen || !root.ci) return
         if (t === "r") { root.refresh(); return }
-        if (root.view === "github") {
-          if (!root.selectedRow || !root.ci) return
-          if (t === "f") root.ci.openFailedLog(root.selectedRow.repo, root.selectedRun.id)
-          else if (t === "R") root.ci.rerunFailed(root.selectedRow.repo, root.selectedRun.id)
-          else if (t === "c") root.ci.cancelRun(root.selectedRow.repo, root.selectedRun.id)
-          return
-        }
-        if (t === "d" || t === "D") { if (root.ci) root.ci.clearFinished() }
+        if (t === "l") { root.openLogInTerminal(); return }
+        if (t === "d" || t === "D") { root.ci.clearFinished(); return }
+        if (!root.runSelected) return
+        if (t === "R") root.ci.rerunFailed(root.selected.repo, root.selectedRun.id)
+        else if (t === "c") root.ci.cancelRun(root.selected.repo, root.selectedRun.id)
       }
 
       ColumnLayout {
         anchors.fill: parent
         spacing: Style.space(10)
 
-        PanelHero {
+        // ---- Header: title left, every action right -----------------------
+
+        RowLayout {
           Layout.fillWidth: true
-          title: "Omarci"
-          meta: root.heroMeta
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          iconComponent: Component {
-            Text {
-              text: "󰙨"
-              color: root.pillColor
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.display
+          spacing: Style.space(8)
+
+          PanelHero {
+            Layout.fillWidth: true
+            title: "Omarci"
+            meta: root.heroMeta
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            iconComponent: Component {
+              Text {
+                text: "󰙨"
+                color: root.pillColor
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.display
+              }
+            }
+          }
+
+          Row {
+            Layout.alignment: Qt.AlignTop | Qt.AlignRight
+            spacing: Style.space(6)
+
+            Button {
+              visible: !root.settingsOpen && root.runSelected
+              text: "Open"
+              tooltipText: "Open on github.com (Enter)"
+              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
+              onClicked: root.ci.openRun(root.selected.repo, root.selectedRun.id)
+            }
+            Button {
+              visible: !root.settingsOpen && root.runSelected
+                && (root.runFailed || root.runState === "cancelled")
+              text: "Re-run failed"
+              tooltipText: "Re-run the failed jobs (R)"
+              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
+              onClicked: root.ci.rerunFailed(root.selected.repo, root.selectedRun.id)
+            }
+            Button {
+              visible: !root.settingsOpen && root.selectedRun !== null && root.selectedRun.status === "completed"
+              text: "Re-run all"
+              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
+              onClicked: root.ci.rerunAll(root.selected.repo, root.selectedRun.id)
+            }
+            Button {
+              visible: !root.settingsOpen && root.selectedRun !== null && root.ci && root.ci.runIsActive(root.selectedRun)
+              text: "Cancel"
+              tooltipText: "Cancel the run (c)"
+              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
+              onClicked: root.ci.cancelRun(root.selected.repo, root.selectedRun.id)
+            }
+            Button {
+              visible: !root.settingsOpen && root.selected !== null
+                && (root.jobSelected || (root.selectedRun !== null && root.selectedRun.status === "completed"))
+              text: "Full log"
+              tooltipText: "Open the log in a terminal (l)"
+              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
+              onClicked: root.openLogInTerminal()
+            }
+            Button {
+              visible: !root.settingsOpen && root.jobSelected
+              text: "Dismiss"
+              tooltipText: "Dismiss this job (x)"
+              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
+              onClicked: root.ci.dismiss(root.selectedJob.id)
+            }
+            Button {
+              visible: !root.settingsOpen && root.jobs.length > 0
+              text: "Clear finished"
+              tooltipText: "Dismiss every finished local job (d)"
+              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
+              onClicked: root.ci.clearFinished()
+            }
+            Button {
+              text: root.settingsOpen ? "Done" : "Settings"
+              tooltipText: root.settingsOpen ? "Back (s)" : "Watched repos and notifications (s)"
+              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
+              onClicked: root.setSettingsOpen(!root.settingsOpen)
             }
           }
         }
 
-        Row {
-          visible: !root.settingsOpen
-          Layout.fillWidth: true
-          spacing: Style.space(6)
+        PanelSeparator { Layout.fillWidth: true; foreground: root.foreground }
 
-          Button {
-            text: "GitHub"
-            bordered: true
-            selected: root.view === "github"
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-            fontSize: Style.font.caption
-            onClicked: root.setView("github")
-          }
-
-          Button {
-            text: "Local"
-            bordered: true
-            selected: root.view === "local"
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-            fontSize: Style.font.caption
-            onClicked: root.setView("local")
-          }
-        }
-
-        // ---- Settings -------------------------------------------------
+        // ---- Settings ----------------------------------------------------
 
         Column {
           visible: root.settingsOpen
           Layout.fillWidth: true
           spacing: Style.space(12)
-
-          PanelSeparator { width: parent.width; foreground: root.foreground }
-
-          PanelSectionHeader {
-            text: "SETTINGS"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-          }
 
           Toggle {
             width: parent.width
@@ -490,10 +549,7 @@ Panel {
 
               Button {
                 text: "Remove"
-                bordered: true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                fontSize: Style.font.caption
+                bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
                 onClicked: if (root.ci) root.ci.removeRepo(repoRow.modelData)
               }
             }
@@ -516,10 +572,7 @@ Panel {
 
             Button {
               text: root.ci && root.ci.addingRepo ? "Adding…" : "Add"
-              bordered: true
-              fontFamily: root.fontFamily
-              foreground: root.foreground
-              fontSize: Style.font.caption
+              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
               enabled: repoField.text.trim() !== "" && !(root.ci && root.ci.addingRepo)
               onClicked: root.addRepoFromField()
             }
@@ -536,166 +589,251 @@ Panel {
           }
         }
 
-        // ---- GitHub runs ----------------------------------------------
+        // ---- Body: list left, detail right ------------------------------
 
-        Column {
-          visible: root.githubView && root.ghRepos.length === 0
+        RowLayout {
+          visible: !root.settingsOpen
           Layout.fillWidth: true
-          spacing: Style.space(8)
+          Layout.fillHeight: true
+          spacing: Style.space(10)
 
-          Text {
-            width: parent.width
-            text: "No repos watched yet. Add one to see its GitHub Actions runs here."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            wrapMode: Text.WordWrap
-          }
+          // Left: one card per watched repo, then local jobs.
+          Flickable {
+            id: listFlick
+            Layout.preferredWidth: Style.space(360)
+            Layout.fillHeight: true
+            contentWidth: width
+            contentHeight: listColumn.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            flickableDirection: Flickable.VerticalFlick
+            interactive: contentHeight > height
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-          Button {
-            text: "Add a repo"
-            bordered: true
-            fontFamily: root.fontFamily
-            foreground: root.foreground
-            fontSize: Style.font.caption
-            onClicked: {
-              root.setSettingsOpen(true)
-              Qt.callLater(function() { repoField.forceActiveFocus() })
-            }
-          }
-        }
+            Column {
+              id: listColumn
+              width: listFlick.width
+              spacing: Style.space(10)
 
-        Flickable {
-          id: ghFlick
-          visible: root.githubView && root.ghRepos.length > 0
-          Layout.fillWidth: true
-          Layout.fillHeight: root.githubView
-          Layout.minimumHeight: root.githubView ? Style.space(160) : 0
-          contentWidth: width
-          contentHeight: repoColumn.implicitHeight
-          clip: true
-          boundsBehavior: Flickable.StopAtBounds
-          flickableDirection: Flickable.VerticalFlick
-          interactive: contentHeight > height
-          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+              Column {
+                visible: root.items.length === 0 && (!root.ci || root.ci.repos.length === 0)
+                width: parent.width
+                spacing: Style.space(8)
 
-          Column {
-            id: repoColumn
-            width: ghFlick.width
-            spacing: Style.space(10)
+                Text {
+                  width: parent.width
+                  text: "No repos watched yet. Add one to see its GitHub Actions runs here."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  wrapMode: Text.WordWrap
+                }
 
-            Repeater {
-              model: root.ghRepos
-              delegate: Rectangle {
-                id: card
-                required property var modelData
-                width: repoColumn.width
-                implicitHeight: cardColumn.implicitHeight + Style.space(16)
+                Button {
+                  text: "Add a repo"
+                  bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
+                  onClicked: {
+                    root.setSettingsOpen(true)
+                    Qt.callLater(function() { repoField.forceActiveFocus() })
+                  }
+                }
+              }
+
+              Repeater {
+                model: root.ghRepos
+                delegate: Rectangle {
+                  id: card
+                  required property var modelData
+                  width: listColumn.width
+                  implicitHeight: cardColumn.implicitHeight + Style.space(12)
+                  radius: Style.cornerRadius
+                  color: root.cardFill
+                  border.width: 1
+                  border.color: root.cardBorder
+
+                  Column {
+                    id: cardColumn
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(6)
+                    spacing: Style.space(1)
+
+                    RowLayout {
+                      width: parent.width
+                      spacing: Style.space(6)
+
+                      Text {
+                        Layout.fillWidth: true
+                        leftPadding: Style.space(4)
+                        text: String(card.modelData.repo)
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: true
+                        elide: Text.ElideRight
+                      }
+
+                      Text {
+                        text: card.modelData.error ? "can't read"
+                          : !card.modelData.loaded ? "loading…"
+                          : card.modelData.runs.length === 0 ? "no runs" : ""
+                        visible: text !== ""
+                        color: card.modelData.error ? root.urgent : root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+
+                    Repeater {
+                      model: card.modelData.runs
+                      delegate: Item {
+                        id: runRow
+                        required property var modelData
+                        required property int index
+                        readonly property int flatIndex: card.modelData.offset + index
+                        readonly property bool isSelected: root.selectedIndex === flatIndex
+                        width: cardColumn.width
+                        implicitHeight: runText.implicitHeight + Style.space(8)
+
+                        Rectangle {
+                          anchors.fill: parent
+                          radius: Style.cornerRadius
+                          color: runRow.isSelected ? Color.menu.selectedBackground : "transparent"
+                        }
+
+                        Row {
+                          anchors.fill: parent
+                          anchors.leftMargin: Style.space(4)
+                          anchors.rightMargin: Style.space(4)
+                          spacing: Style.space(6)
+
+                          Text {
+                            width: Style.space(14)
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.glyphFor(runRow.modelData.status, runRow.modelData.conclusion)
+                            color: root.runColor(runRow.modelData)
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                            horizontalAlignment: Text.AlignHCenter
+                          }
+
+                          Column {
+                            id: runText
+                            width: parent.width - Style.space(14) - Style.space(64) - Style.space(12)
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            Text {
+                              width: parent.width
+                              text: (runRow.modelData.workflow || "workflow") + " · " + (runRow.modelData.branch || "")
+                              color: root.foreground
+                              font.family: root.fontFamily
+                              font.pixelSize: Style.font.caption
+                              elide: Text.ElideRight
+                            }
+
+                            Text {
+                              width: parent.width
+                              text: runRow.modelData.title || ""
+                              color: root.dim
+                              font.family: root.fontFamily
+                              font.pixelSize: Style.font.caption
+                              elide: Text.ElideRight
+                            }
+                          }
+
+                          Text {
+                            width: Style.space(64)
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.ci && root.ci.runIsActive(runRow.modelData)
+                              ? root.ci.runTiming(runRow.modelData)
+                              : root.ago(runRow.modelData.updatedAt)
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                            horizontalAlignment: Text.AlignRight
+                          }
+                        }
+
+                        MouseArea {
+                          anchors.fill: parent
+                          onClicked: root.select(runRow.flatIndex)
+                          onDoubleClicked: if (root.ci) root.ci.openRun(card.modelData.repo, runRow.modelData.id)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              Rectangle {
+                visible: root.jobs.length > 0
+                width: listColumn.width
+                implicitHeight: jobsColumn.implicitHeight + Style.space(12)
                 radius: Style.cornerRadius
-                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+                color: root.cardFill
                 border.width: 1
-                border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
+                border.color: root.cardBorder
 
                 Column {
-                  id: cardColumn
+                  id: jobsColumn
                   anchors.left: parent.left
                   anchors.right: parent.right
                   anchors.top: parent.top
-                  anchors.margins: Style.space(8)
-                  spacing: Style.space(2)
-
-                  RowLayout {
-                    width: parent.width
-                    spacing: Style.space(8)
-
-                    Text {
-                      Layout.fillWidth: true
-                      text: String(card.modelData.repo)
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      font.bold: true
-                      elide: Text.ElideRight
-                    }
-
-                    Text {
-                      text: {
-                        if (card.modelData.error) return "can't read"
-                        if (!card.modelData.loaded) return "loading…"
-                        if (card.modelData.runs.length === 0) return "no runs"
-                        return ""
-                      }
-                      visible: text !== ""
-                      color: card.modelData.error ? root.urgent : root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
+                  anchors.margins: Style.space(6)
+                  spacing: Style.space(1)
 
                   Text {
-                    visible: !!card.modelData.error
-                    width: parent.width
-                    text: card.modelData.error ? String(card.modelData.error) : ""
-                    color: root.dim
+                    leftPadding: Style.space(4)
+                    text: "Local jobs"
+                    color: root.foreground
                     font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WordWrap
-                    maximumLineCount: 2
-                    elide: Text.ElideRight
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
                   }
 
                   Repeater {
-                    model: card.modelData.runs
+                    model: root.jobs
                     delegate: Item {
-                      id: runRow
+                      id: jobRow
                       required property var modelData
                       required property int index
-                      readonly property int flatIndex: card.modelData.offset + index
-                      readonly property bool selected: root.cursorActive && root.ghIndex === flatIndex
-                      width: cardColumn.width
-                      implicitHeight: Math.max(Style.space(38), runLabels.implicitHeight + Style.space(8))
+                      readonly property int flatIndex: root.runCount + index
+                      readonly property bool isSelected: root.selectedIndex === flatIndex
+                      width: jobsColumn.width
+                      implicitHeight: jobText.implicitHeight + Style.space(8)
 
                       Rectangle {
                         anchors.fill: parent
                         radius: Style.cornerRadius
-                        color: runRow.selected ? Color.menu.selectedBackground : "transparent"
+                        color: jobRow.isSelected ? Color.menu.selectedBackground : "transparent"
                       }
 
                       Row {
                         anchors.fill: parent
-                        anchors.leftMargin: Style.space(6)
-                        anchors.rightMargin: Style.space(6)
-                        spacing: Style.space(8)
+                        anchors.leftMargin: Style.space(4)
+                        anchors.rightMargin: Style.space(4)
+                        spacing: Style.space(6)
 
                         Text {
                           width: Style.space(14)
                           anchors.verticalCenter: parent.verticalCenter
-                          text: root.runGlyph(runRow.modelData)
-                          color: root.runColor(runRow.modelData)
+                          text: root.jobGlyph(jobRow.modelData)
+                          color: root.jobColor(jobRow.modelData)
                           font.family: root.fontFamily
-                          font.pixelSize: Style.font.body
+                          font.pixelSize: Style.font.bodySmall
                           horizontalAlignment: Text.AlignHCenter
                         }
 
                         Column {
-                          id: runLabels
-                          width: parent.width - Style.space(14) - Style.space(96) - Style.space(16)
+                          id: jobText
+                          width: parent.width - Style.space(14) - Style.space(64) - Style.space(12)
                           anchors.verticalCenter: parent.verticalCenter
-                          spacing: 0
 
                           Text {
                             width: parent.width
-                            text: (runRow.modelData.workflow || "workflow") + "  ·  " + (runRow.modelData.branch || "")
+                            text: jobRow.modelData.name || "job"
                             color: root.foreground
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.bodySmall
-                            elide: Text.ElideRight
-                          }
-
-                          Text {
-                            width: parent.width
-                            text: (runRow.modelData.title || "") + "  ·  " + (runRow.modelData.actor || "")
-                            color: root.dim
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
                             elide: Text.ElideRight
@@ -703,22 +841,20 @@ Panel {
                         }
 
                         Text {
-                          width: Style.space(96)
+                          width: Style.space(64)
                           anchors.verticalCenter: parent.verticalCenter
-                          text: root.ci ? root.ci.runTiming(runRow.modelData) : ""
+                          text: root.ci ? root.ci.formatElapsed(jobRow.modelData) : ""
                           color: root.dim
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
                           horizontalAlignment: Text.AlignRight
-                          elide: Text.ElideLeft
                         }
                       }
 
                       MouseArea {
                         anchors.fill: parent
-                        hoverEnabled: true
-                        onClicked: root.selectRun(runRow.flatIndex)
-                        onDoubleClicked: if (root.ci) root.ci.openRun(card.modelData.repo, runRow.modelData.id)
+                        onClicked: root.select(jobRow.flatIndex)
+                        onDoubleClicked: if (root.ci) root.ci.openLog(jobRow.modelData.id)
                       }
                     }
                   }
@@ -726,340 +862,219 @@ Panel {
               }
             }
           }
-        }
 
-        // ---- Local jobs -----------------------------------------------
+          // Right: what the selected run or job did.
+          Rectangle {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            radius: Style.cornerRadius
+            color: root.cardFill
+            border.width: 1
+            border.color: root.cardBorder
+
+            Text {
+              visible: root.selected === null
+              anchors.centerIn: parent
+              text: "Select a run or job"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            Flickable {
+              id: detailFlick
+              visible: root.selected !== null
+              anchors.fill: parent
+              anchors.margins: Style.space(10)
+              clip: true
+              contentWidth: width
+              contentHeight: detailColumn.implicitHeight
+              boundsBehavior: Flickable.StopAtBounds
+              flickableDirection: Flickable.VerticalFlick
+              interactive: contentHeight > height
+              ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+              Column {
+                id: detailColumn
+                width: detailFlick.width
+                spacing: Style.space(6)
+
+                // Run header
+                Column {
+                  visible: root.runSelected
+                  width: parent.width
+                  spacing: Style.space(2)
+
+                  Text {
+                    width: parent.width
+                    text: root.selectedRun
+                      ? root.glyphFor(root.selectedRun.status, root.selectedRun.conclusion) + "  "
+                        + (root.selectedRun.workflow || "") + " · " + (root.selectedRun.branch || "")
+                      : ""
+                    color: root.selectedRun ? root.runColor(root.selectedRun) : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: root.selectedRun ? (root.selectedRun.title || "") : ""
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: root.selectedRun && root.ci
+                      ? root.selected.repo + " · " + (root.selectedRun.sha || "") + " · "
+                        + (root.selectedRun.actor || "") + " · " + root.ci.runLabel(root.selectedRun)
+                        + " · " + root.ci.runTiming(root.selectedRun)
+                      : ""
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
+
+                // Job header
+                Column {
+                  visible: root.jobSelected
+                  width: parent.width
+                  spacing: Style.space(2)
+
+                  Text {
+                    width: parent.width
+                    text: root.selectedJob ? root.jobGlyph(root.selectedJob) + "  " + (root.selectedJob.name || "job") : ""
+                    color: root.selectedJob ? root.jobColor(root.selectedJob) : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: root.selectedJob && root.ci
+                      ? "local job · " + root.ci.formatDateTime(root.selectedJob) + " · " + root.ci.formatElapsed(root.selectedJob)
+                        + (root.selectedJob.message ? " · " + root.selectedJob.message : "")
+                      : ""
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
+
+                PanelSeparator { width: parent.width; foreground: root.foreground }
+
+                // The run's jobs and their steps.
+                Text {
+                  visible: root.runSelected && root.runDetailLoading && !root.runDetail
+                  text: "Loading jobs…"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Repeater {
+                  model: root.runSelected && root.runDetail ? root.runDetail.jobs : []
+                  delegate: Column {
+                    id: ghJob
+                    required property var modelData
+                    width: detailColumn.width
+                    spacing: 0
+
+                    Text {
+                      width: parent.width
+                      text: root.glyphFor(ghJob.modelData.status, ghJob.modelData.conclusion) + "  " + (ghJob.modelData.name || "job")
+                        + (ghJob.modelData.startedAt && root.ci
+                           ? "   " + root.ci.formatSeconds((ghJob.modelData.completedAt || root.ci.nowSec) - ghJob.modelData.startedAt)
+                           : "")
+                      color: root.colorFor(ghJob.modelData.status, ghJob.modelData.conclusion)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
+
+                    Repeater {
+                      model: ghJob.modelData.steps || []
+                      delegate: Text {
+                        required property var modelData
+                        width: ghJob.width
+                        leftPadding: Style.space(20)
+                        text: root.glyphFor(modelData.status, modelData.conclusion) + "  " + (modelData.name || "")
+                        color: modelData.conclusion === "success" ? root.dim
+                          : root.colorFor(modelData.status, modelData.conclusion)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideRight
+                      }
+                    }
+                  }
+                }
+
+                PanelSectionHeader {
+                  visible: root.logLines.length > 0
+                  text: root.runSelected && root.runDetail && root.runDetail.logKind === "failed" ? "FAILED JOBS' LOG" : "LOG"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Text {
+                  visible: root.selectedRun !== null && root.ci !== null && root.ci.runIsActive(root.selectedRun)
+                  width: parent.width
+                  text: "The log appears here when the run finishes; Open shows it live on github.com."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+
+                Text {
+                  visible: root.jobSelected && root.logLines.length === 0
+                  text: "No log yet."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Repeater {
+                  model: root.logLines
+                  delegate: Text {
+                    required property var modelData
+                    width: detailColumn.width
+                    text: modelData.text
+                    color: modelData.kind === "error" ? root.urgent
+                      : (modelData.kind === "ok" || modelData.kind === "section") ? root.dim
+                      : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: modelData.kind === "section"
+                    wrapMode: Text.Wrap
+                  }
+                }
+              }
+            }
+          }
+        }
 
         Text {
-          visible: root.localView && root.jobs.length === 0
           Layout.fillWidth: true
-          text: "No local jobs. Start one with `omarci run -- <command>`."
+          text: root.settingsOpen
+            ? "Enter adds a repo · s / Esc back"
+            : "j/k select · Enter open · R re-run failed · c cancel · l full log · x dismiss job · d clear jobs · r refresh · s settings · Esc close"
           color: root.dim
           font.family: root.fontFamily
-          font.pixelSize: Style.font.body
-          wrapMode: Text.WordWrap
-        }
-
-        Flickable {
-          id: jobFlick
-          visible: root.localView && root.jobs.length > 0
-          Layout.fillWidth: true
-          Layout.preferredHeight: Math.min(jobColumn.implicitHeight, Style.space(168))
-          contentWidth: width
-          contentHeight: jobColumn.implicitHeight
-          clip: true
-          boundsBehavior: Flickable.StopAtBounds
-          flickableDirection: Flickable.VerticalFlick
-          interactive: contentHeight > height
-
-          Column {
-            id: jobColumn
-            width: jobFlick.width
-            spacing: Style.space(4)
-
-            Repeater {
-              model: root.jobs
-              delegate: Item {
-                id: row
-                required property var modelData
-                required property int index
-                width: jobColumn.width
-                implicitHeight: Math.max(Style.space(40), rowLabels.implicitHeight + Style.space(10))
-
-                readonly property bool selected: root.cursorActive && root.selectedIndex === index
-
-                Rectangle {
-                  anchors.fill: parent
-                  radius: Style.cornerRadius
-                  color: row.selected ? Color.menu.selectedBackground : "transparent"
-                }
-
-                Row {
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(8)
-                  anchors.rightMargin: Style.space(6)
-                  spacing: Style.space(8)
-
-                  Column {
-                    id: rowLabels
-                    width: parent.width - Style.space(56) - Style.space(8)
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: 0
-
-                    Text {
-                      width: parent.width
-                      text: row.modelData && row.modelData.name ? row.modelData.name : "job"
-                      color: root.statusColor(row.modelData)
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      elide: Text.ElideRight
-                    }
-
-                    Text {
-                      visible: root.rowMessage(row.modelData) !== ""
-                      width: parent.width
-                      text: root.rowMessage(row.modelData)
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      elide: Text.ElideRight
-                    }
-                  }
-
-                  Column {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(56)
-                    spacing: 0
-
-                    Text {
-                      width: parent.width
-                      text: root.ci ? root.ci.formatClock(row.modelData) : ""
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      horizontalAlignment: Text.AlignRight
-                    }
-
-                    Text {
-                      width: parent.width
-                      text: root.ci ? root.ci.formatElapsed(row.modelData) : ""
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      horizontalAlignment: Text.AlignRight
-                    }
-                  }
-                }
-
-                MouseArea {
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  onClicked: root.selectIndex(row.index)
-                  onDoubleClicked: root.activateSelected()
-                }
-              }
-            }
-          }
-        }
-
-        RowLayout {
-          visible: root.localView && root.selectedJob !== null
-          Layout.fillWidth: true
-          spacing: Style.space(8)
-
-          PanelSectionHeader {
-            text: "LOG"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-          }
-
-          Item { Layout.fillWidth: true }
-
-          Text {
-            visible: root.selectedWhen !== ""
-            text: root.selectedWhen
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-        }
-
-        Rectangle {
-          id: logFrame
-          visible: root.localView && root.selectedJob !== null
-          Layout.fillWidth: true
-          Layout.fillHeight: root.localView && root.selectedJob !== null
-          Layout.minimumHeight: root.localView && root.selectedJob !== null ? Style.space(140) : 0
-          radius: Style.cornerRadius
-          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
-
-          Text {
-            visible: root.logLines.length === 0
-            anchors.left: parent.left
-            anchors.top: parent.top
-            anchors.margins: Style.space(10)
-            text: "No log yet."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-
-          Flickable {
-            id: logFlick
-            anchors.fill: parent
-            anchors.margins: Style.space(10)
-            visible: root.logLines.length > 0
-            clip: true
-            contentWidth: width
-            contentHeight: logColumn.implicitHeight
-            boundsBehavior: Flickable.StopAtBounds
-            flickableDirection: Flickable.VerticalFlick
-            interactive: contentHeight > height
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-            Column {
-              id: logColumn
-              width: logFlick.width
-              spacing: Style.space(2)
-
-              Repeater {
-                model: root.logLines
-                delegate: Text {
-                  required property var modelData
-                  required property int index
-                  width: logColumn.width
-                  text: modelData && modelData.text ? modelData.text : ""
-                  color: {
-                    var kind = modelData && modelData.kind ? modelData.kind : "plain"
-                    if (kind === "error") return root.urgent
-                    if (kind === "ok" || kind === "section") return root.dim
-                    return root.foreground
-                  }
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: modelData && modelData.kind === "section"
-                  wrapMode: Text.Wrap
-                  lineHeight: 1.25
-                }
-              }
-            }
-          }
-        }
-
-        // ---- Actions ---------------------------------------------------
-
-        PanelSeparator {
-          Layout.fillWidth: true
-          foreground: root.foreground
-        }
-
-        Column {
-          Layout.fillWidth: true
-          spacing: Style.space(6)
-
-          RowLayout {
-            width: parent.width
-            spacing: Style.space(8)
-
-            Flow {
-              visible: root.githubView
-              Layout.fillWidth: true
-              spacing: Style.space(6)
-
-              Button {
-                text: "Open"
-                bordered: true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                fontSize: Style.font.caption
-                enabled: root.selectedRow !== null
-                onClicked: root.ci.openRun(root.selectedRow.repo, root.selectedRun.id)
-              }
-
-              Button {
-                text: "Re-run failed"
-                bordered: true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                fontSize: Style.font.caption
-                enabled: root.selectedRunState === "failure" || root.selectedRunState === "cancelled"
-                  || root.selectedRunState === "timed_out"
-                onClicked: root.ci.rerunFailed(root.selectedRow.repo, root.selectedRun.id)
-              }
-
-              Button {
-                text: "Re-run all"
-                bordered: true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                fontSize: Style.font.caption
-                enabled: root.selectedRun !== null && root.selectedRun.status === "completed"
-                onClicked: root.ci.rerunAll(root.selectedRow.repo, root.selectedRun.id)
-              }
-
-              Button {
-                text: "Cancel"
-                bordered: true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                fontSize: Style.font.caption
-                enabled: root.selectedRunState === "running" || root.selectedRunState === "queued"
-                onClicked: root.ci.cancelRun(root.selectedRow.repo, root.selectedRun.id)
-              }
-
-              Button {
-                text: "Failed log"
-                bordered: true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                fontSize: Style.font.caption
-                enabled: root.selectedRunState === "failure" || root.selectedRunState === "timed_out"
-                onClicked: root.ci.openFailedLog(root.selectedRow.repo, root.selectedRun.id)
-              }
-            }
-
-            Row {
-              visible: root.localView
-              Layout.fillWidth: true
-              spacing: Style.space(8)
-
-              Button {
-                text: "Open log"
-                bordered: true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                fontSize: Style.font.caption
-                enabled: root.selectedJob !== null
-                onClicked: root.activateSelected()
-              }
-
-              Button {
-                text: "Dismiss"
-                bordered: true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                fontSize: Style.font.caption
-                enabled: root.selectedJob !== null
-                onClicked: root.dismissSelected()
-              }
-
-              Button {
-                text: "Clear finished"
-                bordered: true
-                fontFamily: root.fontFamily
-                foreground: root.foreground
-                fontSize: Style.font.caption
-                enabled: root.jobs.length > 0
-                onClicked: if (root.ci) root.ci.clearFinished()
-              }
-            }
-
-            Item { visible: root.settingsOpen; Layout.fillWidth: true }
-
-            Button {
-              Layout.alignment: Qt.AlignTop
-              text: root.settingsOpen ? "Done" : "Settings"
-              bordered: true
-              fontFamily: root.fontFamily
-              foreground: root.foreground
-              fontSize: Style.font.caption
-              onClicked: root.setSettingsOpen(!root.settingsOpen)
-            }
-          }
-
-          Text {
-            width: parent.width
-            text: {
-              if (root.settingsOpen) return "Enter adds a repo · s / Esc back"
-              if (root.view === "github")
-                return "j/k select · Enter open · R re-run failed · c cancel · f failed log · r refresh · g local · s settings"
-              return "j/k select · Enter open log · x dismiss · d clear · g GitHub · s settings · Esc close"
-            }
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
-          }
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
         }
       }
     }

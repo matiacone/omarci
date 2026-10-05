@@ -352,12 +352,13 @@ Item {
   function rerunAll(repo, id) { runAction("rerun", repo, id) }
   function cancelRun(repo, id) { runAction("cancel", repo, id) }
 
-  function openFailedLog(repo, id) {
+  // The run's log in a terminal: the failed jobs' log, or all of it.
+  function openRunLog(repo, id, all) {
     if (!repo || !id) return
     openLogProc.command = [
       "omarchy-launch-tui", "bash", "-c",
-      "\"$0\" gh log \"$1\" \"$2\" 2>&1 | less -R",
-      root.cliPath, String(repo), String(id)
+      "\"$0\" gh log \"$1\" \"$2\" $3 2>&1 | less -R",
+      root.cliPath, String(repo), String(id), all ? "--all" : ""
     ]
     openLogProc.running = true
   }

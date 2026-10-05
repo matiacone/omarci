@@ -39,7 +39,8 @@ Usage:
   omarci gh open OWNER/REPO RUN_ID
   omarci gh rerun OWNER/REPO RUN_ID [--failed]
   omarci gh cancel OWNER/REPO RUN_ID
-  omarci gh log OWNER/REPO RUN_ID
+  omarci gh log OWNER/REPO RUN_ID [--all]
+  omarci gh view OWNER/REPO RUN_ID
 
 Jobs are stored in $XDG_STATE_HOME/omarci (override with OMARCI_DIR).
 `run` waits for CMD and exits with its status. `--bg` returns the job id
@@ -635,6 +636,31 @@ gh_sync() {
   done <<<"$finished"
 }
 
+# One run's jobs and steps, plus the tail of its log (the failed jobs' log when
+# a job failed, else the whole run's once it finished; GitHub has no log for a
+# run still in progress), as one JSON object for the widget's detail pane.
+# Bounded: the last 300 lines, capped at MAX_LOG_BYTES.
+gh_view() {
+  local repo=$1 id=$2 jobs log=""
+  require_jq
+  jobs=$(gh run view "$id" -R "$repo" --json jobs --jq '[.jobs[] | {
+    name, status, conclusion,
+    startedAt: ((.startedAt // "") | if . == "" or startswith("0001") then null else fromdateiso8601 end),
+    completedAt: ((.completedAt // "") | if . == "" or startswith("0001") then null else fromdateiso8601 end),
+    url,
+    steps: [.steps[]? | {number, name, status, conclusion}]
+  }]')
+  local which=""
+  if jq -e 'any(.[]; .conclusion == "failure" or .conclusion == "timed_out")' >/dev/null <<<"$jobs"; then
+    which=failed
+    log=$( { gh run view "$id" -R "$repo" --log-failed 2>/dev/null || true; } | tail -n 300 | head -c "$MAX_LOG_BYTES")
+  elif jq -e 'length > 0 and all(.[]; .status == "completed")' >/dev/null <<<"$jobs"; then
+    which=all
+    log=$( { gh run view "$id" -R "$repo" --log 2>/dev/null || true; } | tail -n 300 | head -c "$MAX_LOG_BYTES")
+  fi
+  jq -n --argjson jobs "$jobs" --arg log "$log" --arg which "$which" '{jobs: $jobs, log: $log, logKind: $which}'
+}
+
 cmd_gh() {
   local sub=${1:-} repo=${2:-} id=${3:-}
   case $sub in
@@ -661,7 +687,12 @@ cmd_gh() {
       gh_sync
       ;;
     log)
-      gh run view "$id" -R "$repo" --log-failed
+      if [[ ${4:-} == --all ]]; then gh run view "$id" -R "$repo" --log
+      else gh run view "$id" -R "$repo" --log-failed
+      fi
+      ;;
+    view)
+      gh_view "$repo" "$id"
       ;;
     *) die "unknown gh command: $sub" ;;
   esac
