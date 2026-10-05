@@ -2,7 +2,7 @@
 
 GitHub Actions in the [Omarchy](https://omarchy.org/) bar.
 
-Tell it which repos to watch and the bar shows a test-tube pill: a spinner while a run is in progress, red when your latest run failed, green when it passed. Click it for each repo's latest runs, the selected run's jobs, steps and log, and Open, Retry and Cancel. You get a desktop notification when a run you started finishes.
+Tell it which repos to watch and the bar shows a test-tube pill: a spinner while a run is in progress, red when your latest run failed, green when it passed. Click it for each repo's latest runs and the selected run's jobs, steps and log; open, retry or cancel a run from the keyboard. You get a desktop notification when a run you started finishes.
 
 ![Omarci panel](preview.png)
 
@@ -33,13 +33,13 @@ omarci repos              # list
 
 Down the left, a card per watched repo with its latest 10 runs: status, workflow, branch, commit title, how long ago. On the right, the selected run's jobs and steps and the end of its log: the failed jobs' log when something failed, the whole run's otherwise. GitHub has no log for a run still in progress; its steps refresh every few seconds instead. The widget syncs every 15 s while a run is in progress and every minute otherwise.
 
-Top right, three actions for the selected run:
+Keys for the selected run:
 
-| Button | Key | Does |
-| --- | --- | --- |
-| **Open** | `Enter` | The run on github.com |
-| **Retry** | `r` | Re-runs a failed run's failed jobs, or the whole run otherwise |
-| **Cancel** | `c` | Cancels a run in progress |
+| Key | Does |
+| --- | --- |
+| `Enter` (or double-click) | Opens the run on github.com |
+| `r` | Retries: re-runs a failed run's failed jobs, or the whole run otherwise |
+| `c` | Cancels a run in progress (also the **Cancel** button top right) |
 
 `j` / `k` select, `s` opens settings (the gear), `Esc` closes. A finished run's details are cached, and the newest are fetched ahead in the background, so selecting a run is instant.
 

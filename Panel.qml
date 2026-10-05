@@ -405,20 +405,6 @@ Panel {
             spacing: Style.space(6)
 
             Button {
-              visible: !root.settingsOpen && root.selected !== null
-              text: "Open"
-              tooltipText: "Open the run on github.com (Enter)"
-              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
-              onClicked: root.openSelected()
-            }
-            Button {
-              visible: !root.settingsOpen && root.canRetry
-              text: "Retry"
-              tooltipText: root.selectedFailed ? "Re-run the failed jobs (r)" : "Re-run the whole run (r)"
-              bordered: true; fontFamily: root.fontFamily; foreground: root.foreground; fontSize: Style.font.caption
-              onClicked: root.retrySelected()
-            }
-            Button {
               visible: !root.settingsOpen && root.canCancel
               text: "Cancel"
               tooltipText: "Cancel the run (c)"
