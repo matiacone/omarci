@@ -1,8 +1,8 @@
 # Omarci
 
-Local CI in the [Omarchy](https://omarchy.org/) bar.
+CI in the [Omarchy](https://omarchy.org/) bar: your GitHub Actions runs, and local jobs.
 
-Scripts start a job. It passes or fails. The bar shows a test-tube pill — green for the latest pass, red for a fail, a spinner while it runs. Click the pill for the job list, a log tail, and desktop notifications.
+Tell it which repos to watch and the bar shows a test-tube pill: a spinner while a run is in progress, red when your latest run failed, green when it passed. Click it for each repo's latest runs, with Open, Re-run and Cancel, and a desktop notification when a run you started finishes. Scripts can also report local jobs to the same pill.
 
 ![Omarci panel](preview.png)
 
@@ -19,7 +19,41 @@ The widget lands on the right. Move it if you want:
 omarchy bar move io.github.matiacone.omarci --section right --before omarchy.agents
 ```
 
-## Use
+## Watch GitHub Actions
+
+Needs the [GitHub CLI](https://cli.github.com/) signed in (`gh auth login`); omarci uses its login and nothing else.
+
+Add repos from the panel (**Settings** → **Watched repos**, paste `owner/repo` or a github.com URL), or from a terminal:
+
+```bash
+omarci repos add owner/repo
+omarci repos remove owner/repo
+omarci repos              # list
+```
+
+The panel's **GitHub** view shows one card per repo with its latest 10 runs: status, workflow, branch, commit title, who started it, how long it took and how long ago. The widget refreshes every 15 s while a run is in progress and every minute otherwise.
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` | Select a run |
+| `Enter` | Open the run on github.com |
+| `R` | Re-run failed jobs |
+| `c` | Cancel a running run |
+| `f` | Failed jobs' log in a terminal |
+| `r` | Refresh now |
+| `g` | Switch between GitHub and Local |
+
+The buttons under the list do the same, plus **Re-run all**. The same actions work from a terminal:
+
+```bash
+omarci gh sync                              # refresh now
+omarci gh open owner/repo RUN_ID
+omarci gh rerun owner/repo RUN_ID [--failed]
+omarci gh cancel owner/repo RUN_ID
+omarci gh log owner/repo RUN_ID             # failed jobs' log
+```
+
+## Local jobs
 
 ```bash
 # Wait for a command. Exit status is the command's. The bar tracks it live.
@@ -83,9 +117,9 @@ Job history in `~/.local/state/omarci/` is left in place.
 
 Omarci runs unsandboxed inside `omarchy-shell` when enabled. Review the source before installing.
 
-- **Files:** reads and writes `$XDG_STATE_HOME/omarci/` (job index, logs, notify preference). Toggling notifications may update this plugin's entry in `~/.config/omarchy/shell.json`.
-- **Commands:** `notify-send` on pass/fail; `omarchy-launch-tui less` when you open a log; `omarci run` executes the command you pass it.
-- **Network:** none of its own. `omarci run` only does what the wrapped command does.
+- **Files:** reads and writes `$XDG_STATE_HOME/omarci/` (job index, logs, settings with the watched repos, and `github.json` with their latest runs). Toggling notifications may update this plugin's entry in `~/.config/omarchy/shell.json`.
+- **Commands:** `gh` for everything GitHub (it uses your `gh` login; omarci never sees a token); `xdg-open` to open a run; `notify-send` on pass/fail; `omarchy-launch-tui less` when you open a log; `omarci run` executes the command you pass it.
+- **Network:** only through `gh`, to the GitHub API, for the repos you watch: reading runs, and re-running or cancelling the ones you choose.
 - **Privilege:** no sudo, no install hooks.
 
 ## License

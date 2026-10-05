@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Local CI job bus. Scripts start/finish jobs; the Omarci bar plugin displays them.
+# Local CI job bus and GitHub Actions watcher. Scripts start/finish local jobs;
+# `gh sync` mirrors the latest Actions runs of the watched repos. The Omarci bar
+# plugin displays both.
 set -euo pipefail
 
 SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
@@ -11,6 +13,9 @@ LOGS=$OMARCI_DIR/logs
 MAX_JOBS=${OMARCI_MAX_JOBS:-50}
 MAX_INDEX_BYTES=${OMARCI_MAX_INDEX_BYTES:-65536}
 MAX_LOG_BYTES=${OMARCI_MAX_LOG_BYTES:-65536}
+SETTINGS=$OMARCI_DIR/settings.json
+GITHUB=$OMARCI_DIR/github.json
+GH_RUNS_PER_REPO=${OMARCI_GH_RUNS:-10}
 
 die() { printf 'omarci: %s\n' "$*" >&2; exit 1; }
 
@@ -27,10 +32,23 @@ Usage:
   omarci dismiss <id>
   omarci clear [--prune]
 
+  omarci repos [list]
+  omarci repos add OWNER/REPO
+  omarci repos remove OWNER/REPO
+  omarci gh sync
+  omarci gh open OWNER/REPO RUN_ID
+  omarci gh rerun OWNER/REPO RUN_ID [--failed]
+  omarci gh cancel OWNER/REPO RUN_ID
+  omarci gh log OWNER/REPO RUN_ID
+
 Jobs are stored in $XDG_STATE_HOME/omarci (override with OMARCI_DIR).
 `run` waits for CMD and exits with its status. `--bg` returns the job id
 immediately. Pass and fail notify via notify-send unless --no-notify,
 OMARCI_NOTIFY=0, or notifications are disabled in the widget settings.
+
+`repos` and `gh` use the GitHub CLI (`gh`) and its login. `gh sync` writes
+the latest runs of each watched repo to github.json and notifies when a run
+you started finishes.
 EOF
 }
 
@@ -405,7 +423,8 @@ cmd_logs() {
   # still cannot exceed --bytes (default MAX_LOG_BYTES). --bytes 0 is full file.
   if [[ -n $tail_n ]]; then
     if (( bytes > 0 )); then
-      tail -n "$tail_n" -- "$log" | head -c "$bytes"
+      # head stops reading at the cap; tail's SIGPIPE then is the cap working.
+      { tail -n "$tail_n" -- "$log" || true; } | head -c "$bytes"
     else
       tail -n "$tail_n" -- "$log"
     fi
@@ -464,6 +483,190 @@ cmd_clear() {
   fi
 }
 
+# --- GitHub Actions --------------------------------------------------------
+
+require_gh() {
+  command -v gh >/dev/null 2>&1 || die "the GitHub CLI (gh) is required"
+}
+
+valid_repo() {
+  [[ ${1:-} =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && $1 != *..* ]]
+}
+
+valid_run_id() {
+  [[ ${1:-} =~ ^[0-9]+$ ]]
+}
+
+read_settings() {
+  if [[ -f $SETTINGS ]]; then
+    head -c 4096 -- "$SETTINGS"
+  else
+    printf '%s\n' '{"notify":true}'
+  fi
+}
+
+# Settings are shared with the widget, which writes `notify`; every write
+# here keeps the keys it does not change.
+write_settings() {
+  local tmp
+  ensure_dirs
+  tmp=$(mktemp "$OMARCI_DIR/settings.XXXXXX")
+  cat >"$tmp"
+  mv "$tmp" "$SETTINGS"
+}
+
+watched_repos() {
+  read_settings | jq -r '.repos // [] | .[]' 2>/dev/null || true
+}
+
+cmd_repos() {
+  require_jq
+  local sub=${1:-list}
+  case $sub in
+    list)
+      watched_repos
+      ;;
+    add)
+      local repo=${2:-}
+      valid_repo "$repo" || die "repos add needs OWNER/REPO"
+      require_gh
+      local canonical
+      canonical=$(gh api "repos/$repo" --jq .full_name 2>/dev/null) \
+        || die "cannot read $repo with your gh login"
+      acquire
+      read_settings | jq --arg r "$canonical" \
+        '.repos = (((.repos // []) + [$r]) | unique)' | write_settings
+      release
+      printf '%s\n' "$canonical"
+      ;;
+    remove)
+      local repo=${2:-}
+      valid_repo "$repo" || die "repos remove needs OWNER/REPO"
+      acquire
+      read_settings | jq --arg r "$repo" \
+        '.repos = ((.repos // []) | map(select(ascii_downcase != ($r | ascii_downcase))))' | write_settings
+      release
+      if [[ -f $GITHUB ]]; then
+        acquire
+        jq --arg r "$repo" \
+          '.repos |= map(select((.repo | ascii_downcase) != ($r | ascii_downcase)))' "$GITHUB" \
+          | write_github
+        release
+      fi
+      ;;
+    -h|--help) usage ;;
+    *) die "unknown repos command: $sub" ;;
+  esac
+}
+
+write_github() {
+  local tmp
+  tmp=$(mktemp "$OMARCI_DIR/github.XXXXXX")
+  cat >"$tmp"
+  mv "$tmp" "$GITHUB"
+}
+
+# One repo's latest runs, newest first, as the widget reads them.
+fetch_runs() {
+  local repo=$1
+  gh api "repos/$repo/actions/runs?per_page=$GH_RUNS_PER_REPO" --jq '
+    [.workflow_runs[] | {
+      id,
+      workflow: .name,
+      title: .display_title,
+      branch: .head_branch,
+      sha: (.head_sha[0:7]),
+      event,
+      status,
+      conclusion,
+      actor: (.triggering_actor.login // .actor.login),
+      attempt: .run_attempt,
+      url: .html_url,
+      createdAt: (.created_at | fromdateiso8601),
+      startedAt: ((.run_started_at // .created_at) | fromdateiso8601),
+      updatedAt: (.updated_at | fromdateiso8601)
+    }]'
+}
+
+gh_sync() {
+  require_jq
+  require_gh
+  ensure_dirs
+  local me repos repo runs err out='[]'
+  me=$(jq -r '.me // empty' "$GITHUB" 2>/dev/null || true)
+  [[ -n $me ]] || me=$(gh api user --jq .login 2>/dev/null || true)
+  mapfile -t repos < <(watched_repos)
+  local errfile
+  errfile=$(mktemp "$OMARCI_DIR/gh-err.XXXXXX")
+  for repo in "${repos[@]}"; do
+    valid_repo "$repo" || continue
+    if runs=$(fetch_runs "$repo" 2>"$errfile"); then
+      out=$(jq --arg r "$repo" --argjson runs "$runs" '. + [{repo: $r, error: null, runs: $runs}]' <<<"$out")
+    else
+      err=$(head -c 300 "$errfile" | tr "\n" " ")
+      out=$(jq --arg r "$repo" --arg e "${err:-request failed}" '. + [{repo: $r, error: $e, runs: []}]' <<<"$out")
+    fi
+  done
+  rm -f "$errfile"
+
+  local previous='{"repos":[]}'
+  [[ -f $GITHUB ]] && previous=$(head -c 1048576 -- "$GITHUB")
+
+  acquire
+  jq -n --arg me "$me" --argjson repos "$out" --argjson now "$(now_sec)" \
+    '{version: 1, me: $me, fetchedAt: $now, repos: $repos}' | write_github
+  release
+
+  # A run of yours that was unfinished last sync and is finished now.
+  [[ -n $me ]] || return 0
+  local finished line
+  finished=$(jq -rn --argjson prev "$previous" --argjson repos "$out" --arg me "$me" '
+    ([$prev.repos[]? | .repo as $r | .runs[]? | select(.status != "completed") | "\($r)#\(.id)"]) as $open
+    | $repos[] | .repo as $r | .runs[]
+    | select(.actor == $me and .status == "completed" and (("\($r)#\(.id)") as $k | $open | index($k)))
+    | [.conclusion, $r, .workflow, .branch, .title] | @tsv')
+  while IFS=$'\t' read -r conclusion repo workflow branch title; do
+    [[ -n $conclusion ]] || continue
+    if [[ $conclusion == success ]]; then
+      notify low "$workflow passed" "$repo · $branch · $title"
+    else
+      notify critical "$workflow $conclusion" "$repo · $branch · $title"
+    fi
+  done <<<"$finished"
+}
+
+cmd_gh() {
+  local sub=${1:-} repo=${2:-} id=${3:-}
+  case $sub in
+    sync) gh_sync; return ;;
+    -h|--help|"") usage; return ;;
+  esac
+  require_gh
+  valid_repo "$repo" || die "gh $sub needs OWNER/REPO"
+  valid_run_id "$id" || die "gh $sub needs a numeric run id"
+  case $sub in
+    open)
+      local url
+      url=$(gh api "repos/$repo/actions/runs/$id" --jq .html_url)
+      xdg-open "$url" >/dev/null 2>&1 &
+      ;;
+    rerun)
+      if [[ ${4:-} == --failed ]]; then gh run rerun "$id" -R "$repo" --failed
+      else gh run rerun "$id" -R "$repo"
+      fi
+      gh_sync
+      ;;
+    cancel)
+      gh run cancel "$id" -R "$repo"
+      gh_sync
+      ;;
+    log)
+      gh run view "$id" -R "$repo" --log-failed
+      ;;
+    *) die "unknown gh command: $sub" ;;
+  esac
+}
+
 main() {
   local cmd=${1:-}
   case $cmd in
@@ -477,6 +680,8 @@ main() {
     logs) shift; cmd_logs "$@" ;;
     dismiss) shift; cmd_dismiss "$@" ;;
     clear) shift; cmd_clear "$@" ;;
+    repos) shift; cmd_repos "$@" ;;
+    gh) shift; cmd_gh "$@" ;;
     *) die "unknown command: $cmd (see omarci --help)" ;;
   esac
 }

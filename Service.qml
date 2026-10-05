@@ -2,8 +2,10 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// Headless job bus. The CLI owns writes; this service watches index.json
-// so the bar and panel stay live without polling.
+// Headless job bus and GitHub Actions watcher. The CLI owns writes; this
+// service watches index.json (local jobs) and github.json (the watched repos'
+// runs, refreshed by `omarci gh sync` on a timer) so the bar and panel stay
+// live.
 Item {
   id: root
 
@@ -14,16 +16,22 @@ Item {
     || ((Quickshell.env("HOME") || "") + "/.local/state")
   readonly property string indexPath: stateHome + "/omarci/index.json"
   readonly property string settingsPath: stateHome + "/omarci/settings.json"
+  readonly property string githubPath: stateHome + "/omarci/github.json"
   readonly property string cliPath: (manifest && manifest.__sourceDir)
     ? (manifest.__sourceDir + "/bin/omarci")
     : "omarci"
 
   property bool notify: true
+  property var repos: []
+  property var github: ({ me: "", fetchedAt: 0, repos: [] })
+  property string repoError: ""
+  property bool addingRepo: false
 
   // Bounded reads: FileView never maps these files. `head -c` is the cap
   // before stdout reaches StdioCollector / JSON.parse.
   readonly property int maxIndexBytes: 65536
   readonly property int maxSettingsBytes: 4096
+  readonly property int maxGithubBytes: 1048576
   readonly property int maxLogBytes: 65536
   readonly property string logsDir: stateHome + "/omarci/logs/"
 
@@ -42,7 +50,7 @@ Item {
     return list.length > 0 ? list[0] : null
   }
 
-  readonly property string barState: {
+  readonly property string localState: {
     var job = latestJob
     if (!job) return "idle"
     if (job.status === "running") return "running"
@@ -51,13 +59,100 @@ Item {
     return "idle"
   }
 
+  readonly property int ghActiveCount: {
+    var n = 0
+    var list = github && github.repos ? github.repos : []
+    for (var i = 0; i < list.length; i++) {
+      var runs = list[i].runs || []
+      for (var j = 0; j < runs.length; j++)
+        if (runIsActive(runs[j])) n++
+    }
+    return n
+  }
+
+  // Your newest finished run across the watched repos: the bar's GitHub verdict.
+  readonly property var myLatestRun: {
+    var best = null
+    var me = github ? github.me : ""
+    var list = github && github.repos ? github.repos : []
+    for (var i = 0; i < list.length; i++) {
+      var runs = list[i].runs || []
+      for (var j = 0; j < runs.length; j++) {
+        var r = runs[j]
+        if (!r || r.actor !== me || r.status !== "completed") continue
+        if (!best || r.updatedAt > best.run.updatedAt) best = { repo: list[i].repo, run: r }
+      }
+    }
+    return best
+  }
+
+  readonly property string ghState: {
+    if (ghActiveCount > 0) return "running"
+    var latest = myLatestRun
+    if (!latest) return "idle"
+    var c = latest.run.conclusion
+    if (c === "success") return "pass"
+    if (c === "failure" || c === "timed_out" || c === "startup_failure") return "fail"
+    return "idle"
+  }
+
+  readonly property string barState: {
+    if (localState === "running" || ghState === "running") return "running"
+    if (localState === "fail" || ghState === "fail") return "fail"
+    if (localState === "pass" || ghState === "pass") return "pass"
+    return "idle"
+  }
+
   readonly property string tooltip: {
+    var parts = []
+    if (ghActiveCount > 0) parts.push(ghActiveCount + " GitHub run" + (ghActiveCount === 1 ? "" : "s") + " in progress")
+    else if (myLatestRun) parts.push(myLatestRun.run.workflow + " " + runLabel(myLatestRun.run) + " · " + myLatestRun.repo)
     var job = latestJob
-    if (!job) return "Omarci — no jobs"
-    if (job.status === "running") return "Omarci — " + (job.name || "job") + " running"
-    if (job.status === "fail") return "Omarci — " + (job.name || "job") + " failed"
-    if (job.status === "pass") return "Omarci — " + (job.name || "job") + " passed"
-    return "Omarci"
+    if (job) parts.push((job.name || "job") + " " + (job.status === "running" ? "running" : job.status === "fail" ? "failed" : "passed"))
+    return parts.length ? "Omarci — " + parts.join(" · ") : "Omarci — nothing yet"
+  }
+
+  function runIsActive(run) {
+    return !!run && run.status !== "completed"
+  }
+
+  // "running", "queued", or the conclusion ("success", "failure", ...).
+  function runState(run) {
+    if (!run) return ""
+    if (run.status === "in_progress") return "running"
+    if (run.status !== "completed") return "queued"
+    return run.conclusion || "completed"
+  }
+
+  function runLabel(run) {
+    var st = runState(run)
+    if (st === "success") return "passed"
+    if (st === "failure") return "failed"
+    if (st === "cancelled") return "cancelled"
+    return st.replace(/_/g, " ")
+  }
+
+  function shortDuration(s) {
+    s = Math.max(0, Math.floor(s))
+    if (s >= 86400) return Math.floor(s / 86400) + "d"
+    if (s >= 3600) return Math.floor(s / 3600) + "h"
+    if (s >= 60) return Math.floor(s / 60) + "m"
+    return s + "s"
+  }
+
+  // Finished runs: how long they took and how long ago. Running: for how long.
+  function runTiming(run) {
+    if (!run) return ""
+    if (runIsActive(run)) return shortDuration(root.nowSec - (run.startedAt || run.createdAt))
+    var took = (run.updatedAt || 0) - (run.startedAt || run.createdAt || 0)
+    return formatSeconds(took) + " · " + shortDuration(root.nowSec - (run.updatedAt || 0)) + " ago"
+  }
+
+  function formatSeconds(s) {
+    s = Math.max(0, Math.floor(s))
+    if (s >= 3600) return Math.floor(s / 3600) + "h" + pad2(Math.floor((s % 3600) / 60)) + "m"
+    if (s >= 60) return Math.floor(s / 60) + "m" + pad2(s % 60) + "s"
+    return s + "s"
   }
 
   function countStatus(status) {
@@ -166,8 +261,9 @@ Item {
   function parseSettings(content) {
     try {
       var parsed = JSON.parse(String(content || ""))
-      if (parsed && typeof parsed === "object" && typeof parsed.notify === "boolean")
-        root.notify = parsed.notify
+      if (!parsed || typeof parsed !== "object") return
+      if (typeof parsed.notify === "boolean") root.notify = parsed.notify
+      root.repos = Array.isArray(parsed.repos) ? parsed.repos.filter(function(r) { return typeof r === "string" }) : []
     } catch (e) {
       console.warn("omarci: ignoring bad settings", e)
     }
@@ -175,7 +271,7 @@ Item {
 
   function setNotify(value) {
     root.notify = !!value
-    settingsFile.setText(JSON.stringify({ notify: root.notify }, null, 2) + "\n")
+    settingsFile.setText(JSON.stringify({ notify: root.notify, repos: root.repos }, null, 2) + "\n")
   }
 
   function safeLogPath(job) {
@@ -201,7 +297,69 @@ Item {
     onExited: {
       root.readIndexBounded()
       root.readSettingsBounded()
+      root.readGithubBounded()
     }
+  }
+
+  function parseGithub(content) {
+    try {
+      var parsed = JSON.parse(String(content || ""))
+      if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.repos)) return
+      root.github = parsed
+    } catch (e) {
+      console.warn("omarci: ignoring bad github.json", e)
+    }
+  }
+
+  function readGithubBounded() {
+    if (githubReader.running) githubReader.running = false
+    githubReader.running = true
+  }
+
+  function syncGithub() {
+    if (root.repos.length === 0 || syncProc.running) return
+    syncProc.command = [root.cliPath, "gh", "sync"]
+    syncProc.running = true
+  }
+
+  function addRepo(name) {
+    var repo = String(name || "").trim().replace(/^https?:\/\/github\.com\//, "").replace(/\/+$/, "")
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+      root.repoError = "Use OWNER/REPO"
+      return
+    }
+    root.repoError = ""
+    root.addingRepo = true
+    addRepoProc.command = [root.cliPath, "repos", "add", repo]
+    addRepoProc.running = true
+  }
+
+  function removeRepo(repo) {
+    removeRepoProc.command = [root.cliPath, "repos", "remove", String(repo)]
+    removeRepoProc.running = true
+  }
+
+  function runAction(action, repo, id, extra) {
+    if (!repo || !id || actionProc.running) return
+    var cmd = [root.cliPath, "gh", action, String(repo), String(id)]
+    if (extra) cmd.push(extra)
+    actionProc.command = cmd
+    actionProc.running = true
+  }
+
+  function openRun(repo, id) { runAction("open", repo, id) }
+  function rerunFailed(repo, id) { runAction("rerun", repo, id, "--failed") }
+  function rerunAll(repo, id) { runAction("rerun", repo, id) }
+  function cancelRun(repo, id) { runAction("cancel", repo, id) }
+
+  function openFailedLog(repo, id) {
+    if (!repo || !id) return
+    openLogProc.command = [
+      "omarchy-launch-tui", "bash", "-c",
+      "\"$0\" gh log \"$1\" \"$2\" 2>&1 | less -R",
+      root.cliPath, String(repo), String(id)
+    ]
+    openLogProc.running = true
   }
 
   function dismiss(id) {
@@ -224,14 +382,33 @@ Item {
 
   Timer {
     interval: 1000
-    running: root.runningCount > 0
+    running: root.runningCount > 0 || root.ghActiveCount > 0
     repeat: true
     onTriggered: root.nowSec = Date.now() / 1000
   }
 
+  // Ages ("5m ago") drift while nothing runs; a slow tick keeps them honest.
+  Timer {
+    interval: 30000
+    running: root.repos.length > 0
+    repeat: true
+    onTriggered: root.nowSec = Date.now() / 1000
+  }
+
+  // Faster while a watched run is in progress, so the bar flips soon after it ends.
+  Timer {
+    interval: root.ghActiveCount > 0 ? 15000 : 60000
+    running: root.repos.length > 0
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.syncGithub()
+  }
+
+  onReposChanged: Qt.callLater(root.syncGithub)
+
   Timer {
     interval: 80
-    running: root.runningCount > 0
+    running: root.runningCount > 0 || root.ghActiveCount > 0
     repeat: true
     onTriggered: root.spinnerFrame = (root.spinnerFrame + 1) % root.spinnerGlyphs.length
   }
@@ -308,5 +485,59 @@ Item {
 
   Process {
     id: openLogProc
+  }
+
+  FileView {
+    id: githubWatch
+    path: root.githubPath
+    preload: false
+    watchChanges: true
+    printErrors: false
+    onFileChanged: root.readGithubBounded()
+  }
+
+  Process {
+    id: githubReader
+    command: ["head", "-c", String(root.maxGithubBytes), root.githubPath]
+    stdout: StdioCollector {
+      id: githubOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var text = root.boundedText(githubOut, exitCode, root.maxGithubBytes)
+      if (text !== "") root.parseGithub(text)
+    }
+  }
+
+  Process {
+    id: syncProc
+    onExited: root.readGithubBounded()
+  }
+
+  Process {
+    id: addRepoProc
+    stderr: StdioCollector {
+      id: addRepoErr
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      root.addingRepo = false
+      if (exitCode !== 0)
+        root.repoError = String(addRepoErr.text || "").replace(/^omarci: /, "").trim() || "Could not add that repo"
+      root.readSettingsBounded()
+    }
+  }
+
+  Process {
+    id: removeRepoProc
+    onExited: {
+      root.readSettingsBounded()
+      root.readGithubBounded()
+    }
+  }
+
+  Process {
+    id: actionProc
+    onExited: root.readGithubBounded()
   }
 }

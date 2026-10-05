@@ -2,11 +2,14 @@
   "schemaVersion": 1,
   "id": "io.github.matiacone.omarci",
   "name": "Omarci",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "Mathew",
   "license": "MIT",
-  "description": "Local CI jobs in the Omarchy bar: schedule from scripts, watch pass/fail with logs and notifications",
-  "kinds": ["service", "bar-widget"],
+  "description": "Local CI jobs and GitHub Actions runs in the Omarchy bar: watch repos, re-run and cancel runs, pass/fail notifications",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
   "keepLoaded": true,
   "entryPoints": {
     "service": "Service.qml",
@@ -14,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Omarci",
-    "description": "Shows local CI jobs. Click for the job list and log tail.",
+    "description": "Shows your watched repos' GitHub Actions runs and local CI jobs. Click for the run list and actions.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -27,7 +30,7 @@
         "type": "boolean",
         "label": "Notifications",
         "defaultValue": true,
-        "description": "Desktop toast when a job passes or fails"
+        "description": "Desktop toast when a local job, or a GitHub run you started, finishes"
       }
     ]
   }
