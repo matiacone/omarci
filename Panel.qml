@@ -750,25 +750,12 @@ Panel {
             border.color: root.cardBorder
 
             Text {
-              visible: root.shown === null
+              visible: root.shown === null && !root.loading
               anchors.centerIn: parent
-              text: root.loading ? "Loading…" : "Select a run"
+              text: "Select a run"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
-            }
-
-            // A quiet marker while a newer selection's details are on their way.
-            Text {
-              visible: root.loading && root.shown !== null
-              anchors.top: parent.top
-              anchors.right: parent.right
-              anchors.margins: Style.space(8)
-              z: 1
-              text: root.ci ? root.ci.spinnerGlyph + " loading" : "loading"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
             }
 
             Flickable {
