@@ -264,13 +264,13 @@ Panel {
     if (detailProc.running) return
     pendingItem = item
     loading = true
-    detailProc.command = [ci.cliPath, "gh", "view", String(item.repo), String(item.run.id)]
+    detailProc.command = ci.boundedCli(["gh", "view", String(item.repo), String(item.run.id)], ci.maxViewBytes)
     detailProc.running = true
   }
 
   function loadCache() {
     if (!ci || cachedProc.running) return
-    cachedProc.command = [ci.cliPath, "gh", "cached"]
+    cachedProc.command = ci.boundedCli(["gh", "cached"], ci.maxCachedBytes)
     cachedProc.running = true
   }
 
@@ -350,9 +350,10 @@ Panel {
       root.loading = false
       var item = root.pendingItem
       var detail = null
-      if (code === 0 && item) {
+      var text = root.ci ? root.ci.boundedText(detailOut, code, root.ci.maxViewBytes) : ""
+      if (text !== "" && item) {
         try {
-          detail = JSON.parse(String(detailOut.text || ""))
+          detail = JSON.parse(text)
         } catch (e) {
           console.warn("omarci: bad run detail", e)
         }
@@ -378,9 +379,10 @@ Panel {
       waitForEnd: true
     }
     onExited: function(code) {
-      if (code !== 0) return
+      var text = root.ci ? root.ci.boundedText(cachedOut, code, root.ci.maxCachedBytes) : ""
+      if (text === "") return
       try {
-        var loaded = JSON.parse(String(cachedOut.text || "{}"))
+        var loaded = JSON.parse(text)
         root.detailCache = Object.assign(loaded, root.detailCache)
       } catch (e) {
         console.warn("omarci: bad cached views", e)

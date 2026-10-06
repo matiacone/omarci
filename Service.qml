@@ -29,6 +29,8 @@ Item {
   // before stdout reaches StdioCollector / JSON.parse.
   readonly property int maxSettingsBytes: 4096
   readonly property int maxGithubBytes: 1048576
+  readonly property int maxViewBytes: 1048576
+  readonly property int maxCachedBytes: 8388608
 
   property double nowSec: Date.now() / 1000
   property int spinnerFrame: 0
@@ -130,6 +132,12 @@ Item {
     var text = collector.text
     if (text.length >= cap) return ""
     return text
+  }
+
+  // Runs the CLI with its stdout cut at `cap` bytes before StdioCollector sees
+  // it; pipefail makes a cut-off (or failed) command exit non-zero.
+  function boundedCli(args, cap) {
+    return ["bash", "-c", "set -o pipefail; \"$@\" | head -c " + cap, "omarci-bounded", root.cliPath].concat(args)
   }
 
   function readSettingsBounded() {
