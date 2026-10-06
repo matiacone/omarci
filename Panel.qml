@@ -442,6 +442,7 @@ Panel {
             fontFamily: root.fontFamily
             iconComponent: Component {
               Text {
+                textFormat: Text.PlainText
                 text: "󰙨"
                 color: root.pillColor
                 font.family: root.fontFamily
@@ -505,6 +506,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: String(repoRow.modelData)
                 color: root.foreground
@@ -545,6 +547,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.ci && root.ci.repoError !== ""
             width: parent.width
             text: root.ci ? root.ci.repoError : ""
@@ -595,6 +598,7 @@ Panel {
                 spacing: Style.space(8)
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   text: "No repos watched yet. Add one to see its GitHub Actions runs here."
                   color: root.dim
@@ -638,6 +642,7 @@ Panel {
                       spacing: Style.space(6)
 
                       Text {
+                        textFormat: Text.PlainText
                         Layout.fillWidth: true
                         leftPadding: Style.space(4)
                         text: String(card.modelData.repo)
@@ -649,6 +654,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         text: card.modelData.error ? "can't read"
                           : !card.modelData.loaded ? "loading…"
                           : card.modelData.runs.length === 0 ? "no runs" : ""
@@ -682,6 +688,7 @@ Panel {
                           spacing: Style.space(6)
 
                           Text {
+                            textFormat: Text.PlainText
                             width: Style.space(14)
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.glyphFor(runRow.modelData.status, runRow.modelData.conclusion)
@@ -697,6 +704,7 @@ Panel {
                             anchors.verticalCenter: parent.verticalCenter
 
                             Text {
+                              textFormat: Text.PlainText
                               width: parent.width
                               text: (runRow.modelData.workflow || "workflow") + " · " + (runRow.modelData.branch || "")
                               color: root.foreground
@@ -706,6 +714,7 @@ Panel {
                             }
 
                             Text {
+                              textFormat: Text.PlainText
                               width: parent.width
                               text: runRow.modelData.title || ""
                               color: root.dim
@@ -716,6 +725,7 @@ Panel {
                           }
 
                           Text {
+                            textFormat: Text.PlainText
                             width: Style.space(64)
                             anchors.verticalCenter: parent.verticalCenter
                             text: root.ci && root.ci.runIsActive(runRow.modelData)
@@ -750,6 +760,7 @@ Panel {
             border.color: root.cardBorder
 
             Text {
+              textFormat: Text.PlainText
               visible: root.shown === null && !root.loading
               anchors.centerIn: parent
               text: "Select a run"
@@ -790,6 +801,7 @@ Panel {
                   spacing: Style.space(2)
 
                   Text {
+                    textFormat: Text.PlainText
                     width: parent.width
                     text: root.shown
                       ? root.glyphFor(root.shown.run.status, root.shown.run.conclusion) + "  "
@@ -803,6 +815,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     width: parent.width
                     text: root.shown ? (root.shown.run.title || "") : ""
                     color: root.foreground
@@ -814,6 +827,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     width: parent.width
                     text: root.shown && root.ci
                       ? root.shown.repo + " · " + (root.shown.run.sha || "") + " · "
@@ -838,6 +852,7 @@ Panel {
                     spacing: 0
 
                     Text {
+                      textFormat: Text.PlainText
                       width: parent.width
                       text: root.glyphFor(ghJob.modelData.status, ghJob.modelData.conclusion) + "  " + (ghJob.modelData.name || "job")
                         + (ghJob.modelData.startedAt && root.ci
@@ -853,6 +868,7 @@ Panel {
                     Repeater {
                       model: ghJob.modelData.steps || []
                       delegate: Text {
+                        textFormat: Text.PlainText
                         required property var modelData
                         width: ghJob.width
                         leftPadding: Style.space(20)
@@ -868,6 +884,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   visible: root.shown !== null && root.ci !== null && root.ci.runIsActive(root.shown.run)
                   width: parent.width
                   text: "The log appears here when the run finishes; Open shows it live on github.com."
@@ -900,6 +917,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: root.settingsOpen
             ? "Enter adds a repo · s / Esc back"

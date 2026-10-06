@@ -76,8 +76,14 @@ Item {
 
   readonly property string tooltip: {
     if (activeCount > 0) return "Omarci — " + activeCount + " run" + (activeCount === 1 ? "" : "s") + " in progress"
-    if (myLatestRun) return "Omarci — " + myLatestRun.run.workflow + " " + runLabel(myLatestRun.run) + " · " + myLatestRun.repo
+    if (myLatestRun) return "Omarci — " + plainText(myLatestRun.run.workflow) + " " + runLabel(myLatestRun.run) + " · " + myLatestRun.repo
     return repos.length ? "Omarci" : "Omarci — add a repo to watch"
+  }
+
+  // Workflow names come from whoever can push to a watched repo, and the bar's
+  // tooltip may render markup: drop the angle brackets that would make a tag.
+  function plainText(s) {
+    return String(s || "").replace(/[<>]/g, "")
   }
 
   function runIsActive(run) {

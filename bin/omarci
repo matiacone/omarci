@@ -65,6 +65,8 @@ notify() {
   local urgency=$1 title=$2 body=$3
   notify_enabled || return 0
   command -v notify-send >/dev/null 2>&1 || return 0
+  # Notification bodies are markup; run titles come from anyone who can push.
+  body=${body//&/'&amp;'}; body=${body//</'&lt;'}; body=${body//>/'&gt;'}
   notify-send --app-name=omarci --urgency="$urgency" "$title" "$body" || true
 }
 

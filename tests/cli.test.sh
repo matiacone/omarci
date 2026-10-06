@@ -48,7 +48,7 @@ trap 'rm -rf "$OMARCI_DIR" "$FAKE_GH"' EXIT
 
 run_json() { # $1 status, $2 conclusion, $3 actor
   jq -n --arg st "$1" --arg c "$2" --arg a "$3" '{workflow_runs: [{
-    id: 42, name: "ci", display_title: "Fix the thing", head_branch: "main", head_sha: "abcdef1234",
+    id: 42, name: "ci", display_title: "Fix <img src=x> the thing", head_branch: "main", head_sha: "abcdef1234",
     event: "push", status: $st, conclusion: (if $c == "" then null else $c end),
     actor: {login: $a}, triggering_actor: {login: $a}, run_attempt: 1,
     html_url: "https://github.com/Acme/App/actions/runs/42",
@@ -84,6 +84,7 @@ NS
   "$CLI" gh sync
   "$CLI" gh sync
   [[ $(grep -c "ci failure" "$FAKE_GH/toasts") == 1 ]] || fail "a finished run of yours should notify exactly once"
+  grep -qF 'Fix &lt;img src=x&gt; the thing' "$FAKE_GH/toasts" || fail "a run title reaches the notification body unescaped"
   jq '.notify = false' "$OMARCI_DIR/settings.json" >"$OMARCI_DIR/s.tmp" && mv "$OMARCI_DIR/s.tmp" "$OMARCI_DIR/settings.json"
 )
 
