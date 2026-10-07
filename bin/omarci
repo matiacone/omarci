@@ -57,7 +57,8 @@ notify_enabled() {
   [[ ${OMARCI_NOTIFY:-1} != 0 ]] || return 1
   local on
   [[ -f $SETTINGS ]] || return 0
-  on=$(jq -r '.notify // true' "$SETTINGS" 2>/dev/null || printf 'true')
+  # Not `.notify // true`: jq's `//` treats false like null, so it never turns off.
+  on=$(jq -r '.notify != false' "$SETTINGS" 2>/dev/null || printf 'true')
   [[ $on == true || $on == 1 ]]
 }
 

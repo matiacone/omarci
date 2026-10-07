@@ -85,7 +85,13 @@ NS
   "$CLI" gh sync
   [[ $(grep -c "ci failure" "$FAKE_GH/toasts") == 1 ]] || fail "a finished run of yours should notify exactly once"
   grep -qF 'Fix &lt;img src=x&gt; the thing' "$FAKE_GH/toasts" || fail "a run title reaches the notification body unescaped"
+  # Notifications off in settings: the same finish stays silent.
   jq '.notify = false' "$OMARCI_DIR/settings.json" >"$OMARCI_DIR/s.tmp" && mv "$OMARCI_DIR/s.tmp" "$OMARCI_DIR/settings.json"
+  run_json in_progress "" me
+  "$CLI" gh sync
+  run_json completed failure me
+  "$CLI" gh sync
+  [[ $(grep -c "ci failure" "$FAKE_GH/toasts") == 1 ]] || fail "notify: false in settings should silence notifications"
 )
 
 "$CLI" gh rerun Acme/App 42 --failed

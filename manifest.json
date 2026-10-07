@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.matiacone.omarci",
   "name": "Omarci",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "author": "Mathew",
   "license": "MIT",
   "description": "GitHub Actions in the Omarchy bar: watch repos, see each run's jobs, steps and log, Open / Retry / Cancel, and a notification when your run finishes",
